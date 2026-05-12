@@ -1,0 +1,19 @@
+fastapi==0.110.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.9
+pydantic==2.6.0
+pydantic-settings==2.1.0
+pypdf==4.0.0
+# Tencent Cloud COS SDK
+qcloud-python-sts==3.1.5
+cos-python-sdk-v5==1.9.28
+# Future dependencies (commented for now)
+# pillow==10.2.0          # Image processing
+# img2pdf==0.5.1          # Image to PDF
+# python-docx==1.1.0      # Word processing
+# python-pptx==0.6.23     # PPT processing
+# celery==5.3.0           # Async task queue
+# redis==5.0.0            # Redis client
+# sqlalchemy==2.0.0       # ORM
+# alembic==1.13.0         # Migrations
+# psycopg2-binary==2.9.0  # PostgreSQL driver
