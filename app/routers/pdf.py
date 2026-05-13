@@ -70,6 +70,8 @@ async def split_pdf(
             task_id=task_id,
             status="completed",
             message=f"PDF split into {len(output_paths)} file(s)",
+            download_url=download_url,
+            file_count=len(output_paths),
         )
     except Exception as e:
         logger.error(f"Split task {task_id} failed: {e}")
@@ -111,6 +113,8 @@ async def merge_pdf(
             task_id=task_id,
             status="completed",
             message=f"Merged {len(input_paths)} PDF file(s)",
+            download_url=download_url,
+            file_count=1,
         )
     except Exception as e:
         logger.error(f"Merge task {task_id} failed: {e}")
@@ -124,23 +128,27 @@ async def download_file(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found or expired")
 
     # Find the output file (zip or single pdf)
-    candidates = ["merged.pdf", f"{task_id}.zip"]
-    for c in candidates:
+    candidates = [
+        ("merged.pdf", "merged.pdf"),
+        (f"{task_id}.zip", "split-result.zip"),
+    ]
+    for c, download_name in candidates:
         path = os.path.join(task_dir, c)
         if os.path.exists(path):
             return FileResponse(
                 path,
                 media_type="application/octet-stream",
-                filename=c,
+                filename=download_name,
             )
 
     # Fallback: first pdf/zip in dir
     for f in os.listdir(task_dir):
         if f.endswith((".pdf", ".zip")):
+            download_name = "result.zip" if f.endswith(".zip") else "result.pdf"
             return FileResponse(
                 os.path.join(task_dir, f),
                 media_type="application/octet-stream",
-                filename=f,
+                filename=download_name,
             )
 
     raise HTTPException(status_code=404, detail="Output file not found")

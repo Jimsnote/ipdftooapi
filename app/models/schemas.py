@@ -15,6 +15,8 @@ class TaskResponse(BaseModel):
     task_id: str
     status: str
     message: str
+    download_url: str
+    file_count: int
 
 
 class DownloadResponse(BaseModel):
