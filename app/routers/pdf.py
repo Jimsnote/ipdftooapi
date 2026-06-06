@@ -178,11 +178,16 @@ async def compress_pdf(
         compressed_size = os.path.getsize(output_path)
         reduction = round((1 - compressed_size / original_size) * 100, 1) if original_size > 0 else 0
 
+        if reduction > 0:
+            msg = f"PDF 压缩完成，体积减小 {reduction}%"
+        else:
+            msg = f"PDF 处理完成（当前文档已高度优化，进一步压缩空间有限）"
+
         logger.info(f"Compress task {task_id} completed: {original_size} -> {compressed_size} ({reduction}% reduction)")
         return TaskResponse(
             task_id=task_id,
             status="completed",
-            message=f"PDF 压缩完成，体积减小 {reduction}%",
+            message=msg,
             download_url=download_url,
             file_count=1,
         )
