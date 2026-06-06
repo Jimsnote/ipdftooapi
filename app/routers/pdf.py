@@ -9,6 +9,7 @@ from app.config import settings
 from app.models.schemas import TaskResponse, DownloadResponse
 from app.services.pdf_splitter import PDFSplitter
 from app.services.pdf_merger import PDFMerger
+from app.services.pdf_compressor import PDFCompressor
 from app.services.storage import StorageService
 from app.core.logger import get_logger
 from app.core.exceptions import FileTooLargeError, InvalidFileTypeError
@@ -130,6 +131,76 @@ async def download_file(task_id: str):
     # Find the output file (zip or single pdf)
     candidates = [
         ("merged.pdf", "merged.pdf"),
+        ("compressed.pdf", "compressed.pdf"),
+        (f"{task_id}.zip", "split-result.zip"),
+    ]
+    for c, download_name in candidates:
+        path = os.path.join(task_dir, c)
+        if os.path.exists(path):
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename=download_name,
+            )
+
+    # Fallback: first pdf/zip in dir
+    for f in os.listdir(task_dir):
+        if f.endswith((".pdf", ".zip")):
+            download_name = "result.zip" if f.endswith(".zip") else "result.pdf"
+            return FileResponse(
+                os.path.join(task_dir, f),
+                media_type="application/octet-stream",
+                filename=download_name,
+            )
+
+@router.post("/compress", response_model=TaskResponse, summary="Compress a PDF file")
+async def compress_pdf(
+    file: UploadFile = File(...),
+    level: str = Form("normal"),
+):
+    validate_pdf(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.pdf")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        output_path = os.path.join(task_dir, "compressed.pdf")
+        compressor = PDFCompressor(input_path)
+        compressor.compress(output_path, level=level)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        original_size = os.path.getsize(input_path)
+        compressed_size = os.path.getsize(output_path)
+        reduction = round((1 - compressed_size / original_size) * 100, 1) if original_size > 0 else 0
+
+        logger.info(f"Compress task {task_id} completed: {original_size} -> {compressed_size} ({reduction}% reduction)")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"PDF 压缩完成，体积减小 {reduction}%",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"Compress task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/download/{task_id}", summary="Download processed file")
+async def download_file(task_id: str):
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    if not os.path.exists(task_dir):
+        raise HTTPException(status_code=404, detail="Task not found or expired")
+
+    # Find the output file (zip or single pdf)
+    candidates = [
+        ("merged.pdf", "merged.pdf"),
+        ("compressed.pdf", "compressed.pdf"),
         (f"{task_id}.zip", "split-result.zip"),
     ]
     for c, download_name in candidates:
