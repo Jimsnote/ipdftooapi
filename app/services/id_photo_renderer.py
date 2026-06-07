@@ -160,13 +160,14 @@ class IDPhotoRenderer:
         tiled_watermark: TiledWatermark,
         output_path: str,
     ) -> str:
-        self._render_tiled_watermark(tiled_watermark)
-
         for img in images:
             self._render_image(img)
 
         for txt in texts:
             self._render_text(txt)
+
+        # Render tiled watermark on top so it covers photos and text
+        self._render_tiled_watermark(tiled_watermark)
 
         self.canvas.save(
             output_path,
