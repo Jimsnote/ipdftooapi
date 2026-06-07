@@ -79,9 +79,11 @@ class IDPhotoRenderer:
         font_size_px = max(1, _mm_to_px(watermark.font_size))
         font = _load_font(font_size_px)
         text = watermark.text
-        opacity = int(255 * watermark.opacity)
         rgb = _hex_to_rgb(watermark.color)
-        rgba = (*rgb, opacity)
+        # Pre-blend the watermark color against a white background so that
+        # we can draw with alpha=255 and avoid the "double-blending" issue
+        # that makes low-opacity watermarks invisible on white paper.
+        blended = tuple(int(c * (1 - watermark.opacity) + 255 * watermark.opacity) for c in rgb)
 
         bbox = font.getbbox(text)
         text_w = max(1, bbox[2] - bbox[0])
@@ -95,22 +97,18 @@ class IDPhotoRenderer:
             (tile_size // 2 - text_w // 2, tile_size // 2 - text_h // 2),
             text,
             font=font,
-            fill=rgba,
+            fill=(*blended, 255),
         )
         tile = tile.rotate(45, expand=False, resample=Image.BICUBIC)
 
-        overlay = Image.new("RGBA", (self.width_px, self.height_px), (255, 255, 255, 0))
         step = int(tile_size * 0.55)
         y = -tile_size
         while y < self.height_px + tile_size:
             x = -tile_size
             while x < self.width_px + tile_size:
-                overlay.paste(tile, (x, y), tile)
+                self.canvas.paste(tile.convert("RGB"), (x, y), tile.split()[3])
                 x += step
             y += step
-
-        self.canvas = Image.alpha_composite(self.canvas.convert("RGBA"), overlay).convert("RGB")
-        self.draw = ImageDraw.Draw(self.canvas)
 
     def _render_image(self, img: CanvasImage) -> None:
         try:
