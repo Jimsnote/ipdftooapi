@@ -10,6 +10,7 @@ from app.models.schemas import TaskResponse, DownloadResponse
 from app.services.pdf_splitter import PDFSplitter
 from app.services.pdf_merger import PDFMerger
 from app.services.pdf_compressor import PDFCompressor
+from app.services.pdf_converter import PDFToMarkdownConverter
 from app.services.storage import StorageService
 from app.core.logger import get_logger
 from app.core.exceptions import FileTooLargeError, InvalidFileTypeError
@@ -132,6 +133,7 @@ async def download_file(task_id: str):
     candidates = [
         ("merged.pdf", "merged.pdf"),
         ("compressed.pdf", "compressed.pdf"),
+        ("output.md", "output.md"),
         (f"{task_id}.zip", "split-result.zip"),
     ]
     for c, download_name in candidates:
@@ -206,6 +208,72 @@ async def download_file(task_id: str):
     candidates = [
         ("merged.pdf", "merged.pdf"),
         ("compressed.pdf", "compressed.pdf"),
+        (f"{task_id}.zip", "split-result.zip"),
+    ]
+    for c, download_name in candidates:
+        path = os.path.join(task_dir, c)
+        if os.path.exists(path):
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename=download_name,
+            )
+
+    # Fallback: first pdf/zip in dir
+    for f in os.listdir(task_dir):
+        if f.endswith((".pdf", ".zip")):
+            download_name = "result.zip" if f.endswith(".zip") else "result.pdf"
+            return FileResponse(
+                os.path.join(task_dir, f),
+                media_type="application/octet-stream",
+                filename=download_name,
+            )
+
+@router.post("/to-markdown", response_model=TaskResponse, summary="Convert a PDF file to Markdown")
+async def pdf_to_markdown(
+    file: UploadFile = File(...),
+    pages: str = Form("all"),
+):
+    validate_pdf(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.pdf")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        output_path = os.path.join(task_dir, "output.md")
+        converter = PDFToMarkdownConverter()
+        info = converter.convert(input_path, output_path, pages=pages if pages != "all" else None)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"Markdown task {task_id} completed: {info['char_count']} chars")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"PDF 已转换为 Markdown，共 {info['page_count']} 页，{info['char_count']} 字符",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"Markdown task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/download/{task_id}", summary="Download processed file")
+async def download_file(task_id: str):
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    if not os.path.exists(task_dir):
+        raise HTTPException(status_code=404, detail="Task not found or expired")
+
+    # Find the output file (zip or single pdf)
+    candidates = [
+        ("merged.pdf", "merged.pdf"),
+        ("compressed.pdf", "compressed.pdf"),
+        ("output.md", "output.md"),
         (f"{task_id}.zip", "split-result.zip"),
     ]
     for c, download_name in candidates:
