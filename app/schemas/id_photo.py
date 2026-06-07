@@ -26,7 +26,7 @@ class TiledWatermark(BaseModel):
     text: str = ""
     font_size: float = 5.0
     color: str = "#000000"
-    opacity: float = Field(0.15, ge=0, le=1)
+    opacity: float = Field(0.10, ge=0, le=1)
     enabled: bool = False
 
 
