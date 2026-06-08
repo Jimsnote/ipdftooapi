@@ -275,6 +275,17 @@ def validate_word(file: UploadFile):
             raise InvalidFileTypeError()
 
 
+def validate_ppt(file: UploadFile):
+    if file.size and file.size > settings.MAX_UPLOAD_SIZE:
+        raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
+    if file.content_type not in (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.ms-powerpoint",
+    ):
+        if not file.filename or not file.filename.lower().endswith((".pptx", ".ppt")):
+            raise InvalidFileTypeError()
+
+
 @router.post("/word-to-pdf", response_model=TaskResponse, summary="Convert a Word document to PDF")
 async def word_to_pdf(
     file: UploadFile = File(...),
@@ -305,6 +316,39 @@ async def word_to_pdf(
         )
     except Exception as e:
         logger.error(f"Word-to-PDF task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ppt-to-pdf", response_model=TaskResponse, summary="Convert a PowerPoint presentation to PDF")
+async def ppt_to_pdf(
+    file: UploadFile = File(...),
+):
+    validate_ppt(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.pptx")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        output_path = os.path.join(task_dir, "converted.pdf")
+        converter = WordConverter(input_path)
+        converter.convert(output_path)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"PPT-to-PDF task {task_id} completed: {file.filename}")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message="PowerPoint 已转换为 PDF",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"PPT-to-PDF task {task_id} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
