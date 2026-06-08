@@ -12,6 +12,8 @@ from app.services.pdf_merger import PDFMerger
 from app.services.pdf_compressor import PDFCompressor
 from app.services.pdf_converter import PDFToMarkdownConverter
 from app.services.word_converter import WordConverter
+from app.services.pdf_to_image import PDFToImageConverter
+from app.services.image_to_pdf import ImageToPDFConverter
 from app.services.storage import StorageService
 from app.core.logger import get_logger
 from app.core.exceptions import FileTooLargeError, InvalidFileTypeError
@@ -352,6 +354,100 @@ async def ppt_to_pdf(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/to-jpg", response_model=TaskResponse, summary="Convert PDF pages to images")
+async def pdf_to_jpg(
+    file: UploadFile = File(...),
+    format: str = Form("jpg"),
+    pages: str = Form("all"),
+):
+    validate_pdf(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.pdf")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        converter = PDFToImageConverter(input_path)
+        image_paths = converter.convert(
+            output_dir=task_dir,
+            format="jpg" if format == "jpg" else "png",
+            pages=pages,
+        )
+
+        if len(image_paths) == 1:
+            final_path = image_paths[0]
+            download_url = f"/api/v1/pdf/download/{task_id}"
+        else:
+            final_path = os.path.join(task_dir, "images.zip")
+            PDFToImageConverter.zip_images(image_paths, final_path)
+            download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"PDF-to-JPG task {task_id} completed: {len(image_paths)} image(s)")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"PDF 已转换为 {len(image_paths)} 张图片",
+            download_url=download_url,
+            file_count=len(image_paths),
+        )
+    except Exception as e:
+        logger.error(f"PDF-to-JPG task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/from-jpg", response_model=TaskResponse, summary="Convert images to PDF")
+async def jpg_to_pdf(
+    files: List[UploadFile] = File(...),
+    orientation: str = Form("portrait"),
+    fit_mode: str = Form("fit"),
+):
+    if len(files) > settings.MAX_FILES_PER_REQUEST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {settings.MAX_FILES_PER_REQUEST} files allowed",
+        )
+
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_paths = []
+    for f in files:
+        if f.size and f.size > settings.MAX_UPLOAD_SIZE:
+            raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
+        path = os.path.join(task_dir, f.filename or f"input_{len(input_paths)}.jpg")
+        with open(path, "wb") as out:
+            shutil.copyfileobj(f.file, out)
+        input_paths.append(path)
+
+    try:
+        output_path = os.path.join(task_dir, "images.pdf")
+        converter = ImageToPDFConverter()
+        converter.convert(
+            image_paths=input_paths,
+            output_path=output_path,
+            orientation="portrait" if orientation == "portrait" else "landscape",
+            fit_mode="fit" if fit_mode == "fit" else ("fill" if fit_mode == "fill" else "original"),
+        )
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"JPG-to-PDF task {task_id} completed: {len(input_paths)} image(s)")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"已将 {len(input_paths)} 张图片合并为 PDF",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"JPG-to-PDF task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/download/{task_id}", summary="Download processed file")
 async def download_file(task_id: str):
     task_dir = os.path.join(TEMP_DIR, task_id)
@@ -363,8 +459,10 @@ async def download_file(task_id: str):
         ("merged.pdf", "merged.pdf"),
         ("compressed.pdf", "compressed.pdf"),
         ("converted.pdf", "converted.pdf"),
+        ("images.pdf", "images.pdf"),
         ("output.md", "output.md"),
         (f"{task_id}.zip", "split-result.zip"),
+        ("images.zip", "images.zip"),
     ]
     for c, download_name in candidates:
         path = os.path.join(task_dir, c)
