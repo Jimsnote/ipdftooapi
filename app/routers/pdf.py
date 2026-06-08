@@ -15,6 +15,7 @@ from app.services.word_converter import WordConverter
 from app.services.pdf_to_image import PDFToImageConverter
 from app.services.image_to_pdf import ImageToPDFConverter
 from app.services.pdf_protector import PDFProtector
+from app.services.pdf_page_remover import PDFPageRemover
 from app.services.storage import StorageService
 from app.core.logger import get_logger
 from app.core.exceptions import FileTooLargeError, InvalidFileTypeError
@@ -178,6 +179,79 @@ async def protect_pdf(
         )
     except Exception as e:
         logger.error(f"Protect-PDF task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/analyze", summary="Analyze a PDF file and return page count")
+async def analyze_pdf(file: UploadFile = File(...)):
+    validate_pdf(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.pdf")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        remover = PDFPageRemover(input_path)
+        total_pages = remover.total_pages
+        return {
+            "task_id": task_id,
+            "total_pages": total_pages,
+            "filename": file.filename,
+        }
+    except Exception as e:
+        logger.error(f"PDF analyze task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/remove-pages", response_model=TaskResponse, summary="Remove pages from a PDF")
+async def remove_pages(
+    task_id: str = Form(...),
+    pages: str = Form(...),
+):
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    if not os.path.exists(task_dir):
+        raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
+
+    # Find the input PDF
+    input_path = None
+    for f in os.listdir(task_dir):
+        if f.lower().endswith(".pdf"):
+            input_path = os.path.join(task_dir, f)
+            break
+
+    if not input_path:
+        raise HTTPException(status_code=404, detail="未找到 PDF 文件")
+
+    try:
+        remover = PDFPageRemover(input_path)
+        total_pages = remover.total_pages
+        pages_to_remove = PDFPageRemover.parse_page_list(pages, total_pages)
+
+        if not pages_to_remove:
+            raise HTTPException(status_code=400, detail="未指定有效的删除页码")
+        if len(pages_to_remove) >= total_pages:
+            raise HTTPException(status_code=400, detail="不能删除所有页面，至少需要保留一页")
+
+        output_path = os.path.join(task_dir, "removed.pdf")
+        remaining = remover.remove_pages(pages_to_remove, output_path)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"Remove-pages task {task_id} completed: removed {len(pages_to_remove)}, remaining {remaining}")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"已删除 {len(pages_to_remove)} 页，剩余 {remaining} 页",
+            download_url=download_url,
+            file_count=1,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Remove-pages task {task_id} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -516,6 +590,7 @@ async def download_file(task_id: str):
         ("converted.pdf", "converted.pdf"),
         ("images.pdf", "images.pdf"),
         ("protected.pdf", "protected.pdf"),
+        ("removed.pdf", "removed.pdf"),
         ("output.md", "output.md"),
         (f"{task_id}.zip", "split-result.zip"),
         ("images.zip", "images.zip"),
