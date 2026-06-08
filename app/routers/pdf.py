@@ -14,6 +14,7 @@ from app.services.pdf_converter import PDFToMarkdownConverter
 from app.services.word_converter import WordConverter
 from app.services.pdf_to_image import PDFToImageConverter
 from app.services.image_to_pdf import ImageToPDFConverter
+from app.services.pdf_protector import PDFProtector
 from app.services.storage import StorageService
 from app.core.logger import get_logger
 from app.core.exceptions import FileTooLargeError, InvalidFileTypeError
@@ -123,6 +124,60 @@ async def merge_pdf(
         )
     except Exception as e:
         logger.error(f"Merge task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/protect", response_model=TaskResponse, summary="Protect a PDF file with password encryption")
+async def protect_pdf(
+    file: UploadFile = File(...),
+    password: str = Form(...),
+    allow_printing: bool = Form(True),
+    allow_modifying: bool = Form(True),
+    allow_copying: bool = Form(True),
+    allow_annotating: bool = Form(True),
+    allow_form_filling: bool = Form(True),
+    allow_accessibility_extraction: bool = Form(True),
+    allow_assembly: bool = Form(True),
+):
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="密码长度至少为 6 位")
+
+    validate_pdf(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.pdf")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        output_path = os.path.join(task_dir, "protected.pdf")
+        protector = PDFProtector(input_path)
+        protector.protect(
+            output_path=output_path,
+            user_password=password,
+            allow_printing=allow_printing,
+            allow_modifying=allow_modifying,
+            allow_copying=allow_copying,
+            allow_annotating=allow_annotating,
+            allow_form_filling=allow_form_filling,
+            allow_accessibility_extraction=allow_accessibility_extraction,
+            allow_assembly=allow_assembly,
+        )
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"Protect-PDF task {task_id} completed: {file.filename}")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message="PDF 已成功加密保护",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"Protect-PDF task {task_id} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -460,6 +515,7 @@ async def download_file(task_id: str):
         ("compressed.pdf", "compressed.pdf"),
         ("converted.pdf", "converted.pdf"),
         ("images.pdf", "images.pdf"),
+        ("protected.pdf", "protected.pdf"),
         ("output.md", "output.md"),
         (f"{task_id}.zip", "split-result.zip"),
         ("images.zip", "images.zip"),
