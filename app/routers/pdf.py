@@ -591,6 +591,7 @@ async def download_file(task_id: str):
         ("images.pdf", "images.pdf"),
         ("protected.pdf", "protected.pdf"),
         ("removed.pdf", "removed.pdf"),
+        ("merged_invoices.pdf", "发票合并打印.pdf"),
         ("output.md", "output.md"),
         (f"{task_id}.zip", "split-result.zip"),
         ("images.zip", "images.zip"),

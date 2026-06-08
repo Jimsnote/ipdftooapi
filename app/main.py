@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.config import settings
-from app.routers import pdf, health, id_photo
+from app.routers import pdf, health, id_photo, invoice
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -36,3 +36,4 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api/v1", tags=["Health"])
 app.include_router(pdf.router, prefix="/api/v1/pdf", tags=["PDF"])
 app.include_router(id_photo.router, prefix="/api/v1/id-photo", tags=["ID Photo"])
+app.include_router(invoice.router, prefix="/api/v1/invoice", tags=["Invoice"])
