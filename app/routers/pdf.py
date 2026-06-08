@@ -11,6 +11,7 @@ from app.services.pdf_splitter import PDFSplitter
 from app.services.pdf_merger import PDFMerger
 from app.services.pdf_compressor import PDFCompressor
 from app.services.pdf_converter import PDFToMarkdownConverter
+from app.services.word_converter import WordConverter
 from app.services.storage import StorageService
 from app.core.logger import get_logger
 from app.core.exceptions import FileTooLargeError, InvalidFileTypeError
@@ -263,6 +264,50 @@ async def pdf_to_markdown(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def validate_word(file: UploadFile):
+    if file.size and file.size > settings.MAX_UPLOAD_SIZE:
+        raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
+    if file.content_type not in (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    ):
+        if not file.filename or not file.filename.lower().endswith((".docx", ".doc")):
+            raise InvalidFileTypeError()
+
+
+@router.post("/word-to-pdf", response_model=TaskResponse, summary="Convert a Word document to PDF")
+async def word_to_pdf(
+    file: UploadFile = File(...),
+):
+    validate_word(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.docx")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        output_path = os.path.join(task_dir, "converted.pdf")
+        converter = WordConverter(input_path)
+        converter.convert(output_path)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"Word-to-PDF task {task_id} completed: {file.filename}")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message="Word 文档已转换为 PDF",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"Word-to-PDF task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/download/{task_id}", summary="Download processed file")
 async def download_file(task_id: str):
     task_dir = os.path.join(TEMP_DIR, task_id)
@@ -273,6 +318,7 @@ async def download_file(task_id: str):
     candidates = [
         ("merged.pdf", "merged.pdf"),
         ("compressed.pdf", "compressed.pdf"),
+        ("converted.pdf", "converted.pdf"),
         ("output.md", "output.md"),
         (f"{task_id}.zip", "split-result.zip"),
     ]
