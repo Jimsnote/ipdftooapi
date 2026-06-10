@@ -353,37 +353,6 @@ async def compress_pdf(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/download/{task_id}", summary="Download processed file")
-async def download_file(task_id: str):
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    if not os.path.exists(task_dir):
-        raise HTTPException(status_code=404, detail="Task not found or expired")
-
-    # Find the output file (zip or single pdf)
-    candidates = [
-        ("merged.pdf", "merged.pdf"),
-        ("compressed.pdf", "compressed.pdf"),
-        (f"{task_id}.zip", "split-result.zip"),
-    ]
-    for c, download_name in candidates:
-        path = os.path.join(task_dir, c)
-        if os.path.exists(path):
-            return FileResponse(
-                path,
-                media_type="application/octet-stream",
-                filename=download_name,
-            )
-
-    # Fallback: first pdf/zip in dir
-    for f in os.listdir(task_dir):
-        if f.endswith((".pdf", ".zip")):
-            download_name = "result.zip" if f.endswith(".zip") else "result.pdf"
-            return FileResponse(
-                os.path.join(task_dir, f),
-                media_type="application/octet-stream",
-                filename=download_name,
-            )
-
 @router.post("/to-markdown", response_model=TaskResponse, summary="Convert a PDF file to Markdown")
 async def pdf_to_markdown(
     file: UploadFile = File(...),
