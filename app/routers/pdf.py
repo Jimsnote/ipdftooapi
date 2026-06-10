@@ -16,6 +16,7 @@ from app.services.pdf_to_image import PDFToImageConverter
 from app.services.image_to_pdf import ImageToPDFConverter
 from app.services.pdf_protector import PDFProtector
 from app.services.pdf_page_remover import PDFPageRemover
+from app.services.pdf_to_word import PDFToWordConverter
 from app.services.storage import StorageService
 from app.core.logger import get_logger
 from app.core.exceptions import FileTooLargeError, InvalidFileTypeError
@@ -353,6 +354,43 @@ async def compress_pdf(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/to-word", response_model=TaskResponse, summary="Convert a PDF file to Word")
+async def pdf_to_word(
+    file: UploadFile = File(...),
+    pages: str = Form("all"),
+):
+    validate_pdf(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.pdf")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        output_path = os.path.join(task_dir, "converted.docx")
+        converter = PDFToWordConverter()
+        info = converter.convert(
+            input_path, output_path,
+            pages=pages if pages != "all" else None
+        )
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"PDF-to-Word task {task_id} completed: {info['page_count']} pages")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"PDF 已转换为 Word 文档，共 {info['page_count']} 页",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"PDF-to-Word task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/to-markdown", response_model=TaskResponse, summary="Convert a PDF file to Markdown")
 async def pdf_to_markdown(
     file: UploadFile = File(...),
@@ -586,6 +624,7 @@ async def download_file(task_id: str):
         ("merged_invoices.pdf", "发票合并打印.pdf"),
         ("output.md", "output.md"),
         (f"{task_id}.zip", "split-result.zip"),
+        ("converted.docx", "converted.docx"),
         ("images.zip", "images.zip"),
     ]
     for c, download_name in candidates:
