@@ -121,7 +121,7 @@ async def merge_invoices(
 
 
 @router.get("/download/{task_id}", summary="Download merged invoice PDF")
-async def download_merged(task_id: str):
+async def download_merged(task_id: str, preview: bool = False):
     task_dir = os.path.join(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="任务不存在或已过期")
@@ -129,6 +129,13 @@ async def download_merged(task_id: str):
     output_path = os.path.join(task_dir, "merged_invoices.pdf")
     if not os.path.exists(output_path):
         raise HTTPException(status_code=404, detail="输出文件不存在")
+
+    # preview=true 时不设置 attachment，让浏览器直接预览 PDF
+    if preview:
+        return FileResponse(
+            output_path,
+            media_type="application/pdf",
+        )
 
     return FileResponse(
         output_path,
