@@ -25,11 +25,5 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
     MAX_FILES_PER_REQUEST: int = 20
 
-    @property
-    def cors_origins_list(self) -> List[str]:
-        if isinstance(self.CORS_ORIGINS, str):
-            return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
-        return self.CORS_ORIGINS
-
 
 settings = Settings()

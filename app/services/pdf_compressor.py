@@ -129,11 +129,10 @@ class PDFCompressor:
         writer = PdfWriter()
 
         for page in reader.pages:
-            page.compress_content_streams()
             writer.add_page(page)
 
-        # Try to remove duplicated objects
-        writer.remove_objects_from_page(writer.pages[0])  # no-op trigger
+        for page in writer.pages:
+            page.compress_content_streams()
 
         with open(output_path, "wb") as f:
             writer.write(f)

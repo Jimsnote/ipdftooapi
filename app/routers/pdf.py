@@ -128,6 +128,62 @@ async def merge_pdf(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/merge-batch", response_model=TaskResponse, summary="Merge multiple PDF files uploaded one by one")
+async def merge_batch(
+    file: UploadFile = File(...),
+    task_id: str = Form(...),
+    index: int = Form(...),
+    total: int = Form(...),
+):
+    """Upload PDFs one by one and merge them when all are received.
+
+    Frontend (e.g. WeChat Mini Program) can only send one file per wx.uploadFile call.
+    This endpoint accumulates files and triggers merge on the last upload.
+    """
+    validate_pdf(file)
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, f"{index}.pdf")
+    with open(input_path, "wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    logger.info(f"Merge-batch task {task_id}: received file {index + 1}/{total}")
+
+    # Check if all files have been uploaded
+    uploaded = set(os.listdir(task_dir))
+    expected = {f"{i}.pdf" for i in range(total)}
+
+    if not (uploaded >= expected):
+        return TaskResponse(
+            task_id=task_id,
+            status="uploading",
+            message=f"已上传 {len(uploaded)} / {total} 个文件",
+            download_url="",
+            file_count=0,
+        )
+
+    # All files received, perform merge
+    try:
+        input_paths = [os.path.join(task_dir, f"{i}.pdf") for i in range(total)]
+        output_path = os.path.join(task_dir, "merged.pdf")
+        merger = PDFMerger(input_paths)
+        merger.merge(output_path)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+        logger.info(f"Merge-batch task {task_id} completed: {total} files")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"PDF 合并完成，共 {total} 个文件",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"Merge-batch task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/protect", response_model=TaskResponse, summary="Protect a PDF file with password encryption")
 async def protect_pdf(
     file: UploadFile = File(...),
@@ -189,7 +245,7 @@ async def analyze_pdf(file: UploadFile = File(...)):
     task_dir = os.path.join(TEMP_DIR, task_id)
     os.makedirs(task_dir, exist_ok=True)
 
-    input_path = os.path.join(task_dir, file.filename or "input.pdf")
+    input_path = os.path.join(task_dir, "input.pdf")
     with open(input_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
@@ -215,15 +271,10 @@ async def remove_pages(
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
 
-    # Find the input PDF
-    input_path = None
-    for f in os.listdir(task_dir):
-        if f.lower().endswith(".pdf"):
-            input_path = os.path.join(task_dir, f)
-            break
-
-    if not input_path:
-        raise HTTPException(status_code=404, detail="未找到 PDF 文件")
+    # 明确使用 analyze 接口保存的原始文件
+    input_path = os.path.join(task_dir, "input.pdf")
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail="未找到 PDF 文件，请重新上传")
 
     try:
         remover = PDFPageRemover(input_path)
@@ -237,6 +288,10 @@ async def remove_pages(
 
         output_path = os.path.join(task_dir, "removed.pdf")
         remaining = remover.remove_pages(pages_to_remove, output_path)
+
+        # 删除原文件，避免下载接口 fallback 时返回原文件
+        if os.path.exists(input_path):
+            os.remove(input_path)
 
         download_url = f"/api/v1/pdf/download/{task_id}"
 
@@ -254,38 +309,6 @@ async def remove_pages(
         logger.error(f"Remove-pages task {task_id} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-@router.get("/download/{task_id}", summary="Download processed file")
-async def download_file(task_id: str):
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    if not os.path.exists(task_dir):
-        raise HTTPException(status_code=404, detail="Task not found or expired")
-
-    # Find the output file (zip or single pdf)
-    candidates = [
-        ("merged.pdf", "merged.pdf"),
-        ("compressed.pdf", "compressed.pdf"),
-        ("output.md", "output.md"),
-        (f"{task_id}.zip", "split-result.zip"),
-    ]
-    for c, download_name in candidates:
-        path = os.path.join(task_dir, c)
-        if os.path.exists(path):
-            return FileResponse(
-                path,
-                media_type="application/octet-stream",
-                filename=download_name,
-            )
-
-    # Fallback: first pdf/zip in dir
-    for f in os.listdir(task_dir):
-        if f.endswith((".pdf", ".zip")):
-            download_name = "result.zip" if f.endswith(".zip") else "result.pdf"
-            return FileResponse(
-                os.path.join(task_dir, f),
-                media_type="application/octet-stream",
-                filename=download_name,
-            )
 
 @router.post("/compress", response_model=TaskResponse, summary="Compress a PDF file")
 async def compress_pdf(
