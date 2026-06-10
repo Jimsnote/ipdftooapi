@@ -2,9 +2,19 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# 安装系统运行依赖：
+# - gcc：部分 Python 包在无 wheel 时需要编译
+# - ghostscript：PDF 压缩优先使用
+# - libreoffice-writer / libreoffice-impress：Word/PPT 转 PDF
+# - fontconfig + 中文字体：发票合并、证件照排版渲染中文水印和页码
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    ghostscript \
+    libreoffice-writer \
+    libreoffice-impress \
+    fontconfig \
+    fonts-noto-cjk \
+    fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
