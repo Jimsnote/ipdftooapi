@@ -18,6 +18,7 @@ from app.services.pdf_protector import PDFProtector
 from app.services.pdf_page_remover import PDFPageRemover
 from app.services.pdf_to_word import PDFToWordConverter
 from app.services.ofd_converter import OFDConverter
+from app.services.markdown_converter import OfficeToMarkdownConverter
 from app.services.storage import StorageService
 from app.core.logger import get_logger
 from app.core.exceptions import FileTooLargeError, InvalidFileTypeError
@@ -448,6 +449,17 @@ def validate_ppt(file: UploadFile):
             raise InvalidFileTypeError()
 
 
+def validate_excel(file: UploadFile):
+    if file.size and file.size > settings.MAX_UPLOAD_SIZE:
+        raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
+    if file.content_type not in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    ):
+        if not file.filename or not file.filename.lower().endswith((".xlsx", ".xls")):
+            raise InvalidFileTypeError()
+
+
 def validate_ofd(file: UploadFile):
     if file.size and file.size > settings.MAX_UPLOAD_SIZE:
         raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
@@ -604,6 +616,105 @@ async def ofd_to_pdf(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/word-to-markdown", response_model=TaskResponse, summary="Convert a Word document to Markdown")
+async def word_to_markdown(
+    file: UploadFile = File(...),
+):
+    validate_word(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.docx")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        output_path = os.path.join(task_dir, "converted.md")
+        converter = OfficeToMarkdownConverter()
+        info = converter.convert(input_path, output_path)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"Word-to-Markdown task {task_id} completed: {info['char_count']} chars")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"Word 文档已转换为 Markdown，共 {info['char_count']} 字符",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"Word-to-Markdown task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ppt-to-markdown", response_model=TaskResponse, summary="Convert a PowerPoint presentation to Markdown")
+async def ppt_to_markdown(
+    file: UploadFile = File(...),
+):
+    validate_ppt(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.pptx")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        output_path = os.path.join(task_dir, "converted.md")
+        converter = OfficeToMarkdownConverter()
+        info = converter.convert(input_path, output_path)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"PPT-to-Markdown task {task_id} completed: {info['char_count']} chars")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"PowerPoint 已转换为 Markdown，共 {info['char_count']} 字符",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"PPT-to-Markdown task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/excel-to-markdown", response_model=TaskResponse, summary="Convert an Excel spreadsheet to Markdown")
+async def excel_to_markdown(
+    file: UploadFile = File(...),
+):
+    validate_excel(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.xlsx")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        output_path = os.path.join(task_dir, "converted.md")
+        converter = OfficeToMarkdownConverter()
+        info = converter.convert(input_path, output_path)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"Excel-to-Markdown task {task_id} completed: {info['char_count']} chars")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"Excel 表格已转换为 Markdown，共 {info['char_count']} 字符",
+            download_url=download_url,
+            file_count=1,
+        )
+    except Exception as e:
+        logger.error(f"Excel-to-Markdown task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/from-jpg", response_model=TaskResponse, summary="Convert images to PDF")
 async def jpg_to_pdf(
     files: List[UploadFile] = File(...),
@@ -672,6 +783,7 @@ async def download_file(task_id: str):
         ("output.md", "output.md"),
         (f"{task_id}.zip", "split-result.zip"),
         ("converted.docx", "converted.docx"),
+        ("converted.md", "converted.md"),
         ("images.zip", "images.zip"),
     ]
     for c, download_name in candidates:
