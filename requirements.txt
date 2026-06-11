@@ -10,6 +10,9 @@ pymupdf4llm>=0.0.17
 qcloud-python-sts==3.1.5
 cos-python-sdk-v5==1.9.28
 pillow==10.2.0            # Image processing / ID photo rendering
+easyofd>=0.5.6            # OFD parsing and conversion (OFD <-> PDF)
+numpy>=1.24.0             # easyofd dependency
+reportlab>=3.6.0          # easyofd dependency
 
 pdf2docx==0.5.8         # PDF to Word conversion
 python-docx==1.1.2      # Word document generation

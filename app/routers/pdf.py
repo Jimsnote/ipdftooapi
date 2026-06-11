@@ -17,6 +17,7 @@ from app.services.image_to_pdf import ImageToPDFConverter
 from app.services.pdf_protector import PDFProtector
 from app.services.pdf_page_remover import PDFPageRemover
 from app.services.pdf_to_word import PDFToWordConverter
+from app.services.ofd_converter import OFDConverter
 from app.services.storage import StorageService
 from app.core.logger import get_logger
 from app.core.exceptions import FileTooLargeError, InvalidFileTypeError
@@ -447,6 +448,14 @@ def validate_ppt(file: UploadFile):
             raise InvalidFileTypeError()
 
 
+def validate_ofd(file: UploadFile):
+    if file.size and file.size > settings.MAX_UPLOAD_SIZE:
+        raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
+    if file.content_type != "application/ofd":
+        if not file.filename or not file.filename.lower().endswith(".ofd"):
+            raise InvalidFileTypeError()
+
+
 @router.post("/word-to-pdf", response_model=TaskResponse, summary="Convert a Word document to PDF")
 async def word_to_pdf(
     file: UploadFile = File(...),
@@ -554,6 +563,44 @@ async def pdf_to_jpg(
         )
     except Exception as e:
         logger.error(f"PDF-to-JPG task {task_id} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ofd-to-pdf", response_model=TaskResponse, summary="Convert an OFD file to PDF")
+async def ofd_to_pdf(
+    file: UploadFile = File(...),
+):
+    validate_ofd(file)
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    input_path = os.path.join(task_dir, file.filename or "input.ofd")
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        output_path = os.path.join(task_dir, "converted.pdf")
+        converter = OFDConverter()
+        success, result = converter.ofd_to_pdf(input_path, output_path)
+
+        if not success:
+            raise HTTPException(status_code=422, detail=f"OFD 转换失败: {result}")
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"OFD-to-PDF task {task_id} completed: {file.filename}")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message="OFD 文件已成功转换为 PDF",
+            download_url=download_url,
+            file_count=1,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"OFD-to-PDF task {task_id} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
