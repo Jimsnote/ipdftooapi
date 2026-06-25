@@ -45,6 +45,14 @@ OFD_EXTENSIONS = (".ofd",)
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 
+def raise_processing_error(error: Exception):
+    if isinstance(error, HTTPException):
+        raise error
+    if isinstance(error, ValueError):
+        raise HTTPException(status_code=400, detail=str(error))
+    raise HTTPException(status_code=500, detail=str(error))
+
+
 def validate_pdf(file: UploadFile):
     if file.size and file.size > settings.MAX_UPLOAD_SIZE:
         raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
@@ -101,7 +109,7 @@ async def split_pdf(
         )
     except Exception as e:
         logger.error(f"Split task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/merge", response_model=TaskResponse, summary="Merge multiple PDF files")
@@ -140,7 +148,7 @@ async def merge_pdf(
         )
     except Exception as e:
         logger.error(f"Merge task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/merge-batch", response_model=TaskResponse, summary="Merge multiple PDF files uploaded one by one")
@@ -195,7 +203,7 @@ async def merge_batch(
         )
     except Exception as e:
         logger.error(f"Merge-batch task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/protect", response_model=TaskResponse, summary="Protect a PDF file with password encryption")
@@ -245,7 +253,7 @@ async def protect_pdf(
         )
     except Exception as e:
         logger.error(f"Protect-PDF task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/analyze", summary="Analyze a PDF file and return page count")
@@ -265,7 +273,7 @@ async def analyze_pdf(file: UploadFile = File(...)):
         }
     except Exception as e:
         logger.error(f"PDF analyze task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/remove-pages", response_model=TaskResponse, summary="Remove pages from a PDF")
@@ -313,7 +321,7 @@ async def remove_pages(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Remove-pages task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/compress", response_model=TaskResponse, summary="Compress a PDF file")
@@ -352,7 +360,7 @@ async def compress_pdf(
         )
     except Exception as e:
         logger.error(f"Compress task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/to-word", response_model=TaskResponse, summary="Convert a PDF file to Word")
@@ -385,7 +393,7 @@ async def pdf_to_word(
         )
     except Exception as e:
         logger.error(f"PDF-to-Word task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/to-markdown", response_model=TaskResponse, summary="Convert a PDF file to Markdown")
@@ -415,7 +423,7 @@ async def pdf_to_markdown(
         )
     except Exception as e:
         logger.error(f"Markdown task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 def validate_upload(file: UploadFile, allowed_extensions: tuple[str, ...]):
@@ -481,7 +489,7 @@ async def word_to_pdf(
         )
     except Exception as e:
         logger.error(f"Word-to-PDF task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/ppt-to-pdf", response_model=TaskResponse, summary="Convert a PowerPoint presentation to PDF")
@@ -510,7 +518,7 @@ async def ppt_to_pdf(
         )
     except Exception as e:
         logger.error(f"PPT-to-PDF task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/to-jpg", response_model=TaskResponse, summary="Convert PDF pages to images")
@@ -550,7 +558,7 @@ async def pdf_to_jpg(
         )
     except Exception as e:
         logger.error(f"PDF-to-JPG task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/ofd-to-pdf", response_model=TaskResponse, summary="Convert an OFD file to PDF")
@@ -584,7 +592,7 @@ async def ofd_to_pdf(
         raise
     except Exception as e:
         logger.error(f"OFD-to-PDF task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/word-to-markdown", response_model=TaskResponse, summary="Convert a Word document to Markdown")
@@ -613,7 +621,7 @@ async def word_to_markdown(
         )
     except Exception as e:
         logger.error(f"Word-to-Markdown task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/ppt-to-markdown", response_model=TaskResponse, summary="Convert a PowerPoint presentation to Markdown")
@@ -642,7 +650,7 @@ async def ppt_to_markdown(
         )
     except Exception as e:
         logger.error(f"PPT-to-Markdown task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/excel-to-markdown", response_model=TaskResponse, summary="Convert an Excel spreadsheet to Markdown")
@@ -671,7 +679,7 @@ async def excel_to_markdown(
         )
     except Exception as e:
         logger.error(f"Excel-to-Markdown task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/from-jpg", response_model=TaskResponse, summary="Convert images to PDF")
@@ -721,7 +729,7 @@ async def jpg_to_pdf(
         )
     except Exception as e:
         logger.error(f"JPG-to-PDF task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.get("/download/{task_id}", summary="Download processed file")

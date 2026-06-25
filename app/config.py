@@ -1,5 +1,8 @@
+import json
+from typing import Any, List
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List
 
 
 class Settings(BaseSettings):
@@ -13,6 +16,26 @@ class Settings(BaseSettings):
     APP_VERSION: str = "0.1.0"
     DEBUG: bool = False
     CORS_ORIGINS: List[str] = ["http://localhost:3000"]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: Any) -> List[str] | Any:
+        if isinstance(value, str):
+            raw_value = value.strip()
+            if not raw_value:
+                return []
+
+            if raw_value.startswith("["):
+                parsed = json.loads(raw_value)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+
+            return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+        if isinstance(value, (tuple, set)):
+            return list(value)
+
+        return value
 
     # COS
     COS_SECRET_ID: str = ""

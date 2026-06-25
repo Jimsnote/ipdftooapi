@@ -19,6 +19,14 @@ MAX_INVOICE_SIZE = 10 * 1024 * 1024  # 10MB per file
 PDF_EXTENSIONS = (".pdf",)
 
 
+def raise_processing_error(error: Exception):
+    if isinstance(error, HTTPException):
+        raise error
+    if isinstance(error, ValueError):
+        raise HTTPException(status_code=400, detail=str(error))
+    raise HTTPException(status_code=500, detail=str(error))
+
+
 @router.post("/analyze", summary="Analyze uploaded invoice PDFs and return dimensions")
 async def analyze_invoices(
     files: List[UploadFile] = File(...),
@@ -62,7 +70,7 @@ async def analyze_invoices(
         }
     except Exception as e:
         logger.error(f"Invoice analyze task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.post("/merge", response_model=TaskResponse, summary="Merge invoices into A4 PDF")
@@ -114,7 +122,7 @@ async def merge_invoices(
         )
     except Exception as e:
         logger.error(f"Invoice merge task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise_processing_error(e)
 
 
 @router.get("/download/{task_id}", summary="Download merged invoice PDF")
