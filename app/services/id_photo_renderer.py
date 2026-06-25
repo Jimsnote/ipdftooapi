@@ -14,6 +14,10 @@ logger = get_logger(__name__)
 A4_WIDTH_MM = 210.0
 A4_HEIGHT_MM = 297.0
 DPI = 300
+IMAGE_MAGIC_PREFIXES = (
+    b"\xff\xd8\xff",
+    b"\x89PNG\r\n\x1a\n",
+)
 
 _FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -50,6 +54,11 @@ def _parse_base64(src: str) -> bytes:
     if src.startswith("data:"):
         src = src.split(",", 1)[-1]
     return base64.b64decode(src.strip())
+
+
+def _validate_image_header(data: bytes) -> None:
+    if not any(data.startswith(prefix) for prefix in IMAGE_MAGIC_PREFIXES):
+        raise ValueError("\u4ec5\u652f\u6301 JPG \u6216 PNG \u56fe\u7247")
 
 
 def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
@@ -113,7 +122,10 @@ class IDPhotoRenderer:
     def _render_image(self, img: CanvasImage) -> None:
         try:
             data = _parse_base64(img.src)
+            _validate_image_header(data)
             source = Image.open(io.BytesIO(data)).convert("RGBA")
+        except ValueError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to decode image {img.id}: {e}")
             return

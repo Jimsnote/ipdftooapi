@@ -21,5 +21,5 @@ class InvalidFileTypeError(HTTPException):
     def __init__(self):
         super().__init__(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Invalid file type. Only PDF files are supported.",
+            detail="\u6587\u4ef6\u7c7b\u578b\u4e0d\u652f\u6301\uff0c\u8bf7\u4e0a\u4f20\u5bf9\u5e94\u683c\u5f0f\u7684\u6587\u4ef6\u3002",
         )

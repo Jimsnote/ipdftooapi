@@ -1,12 +1,10 @@
 import os
-import uuid
-import shutil
 from typing import List
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 
 from app.config import settings
-from app.models.schemas import TaskResponse, DownloadResponse
+from app.models.schemas import TaskResponse
 from app.services.pdf_splitter import PDFSplitter
 from app.services.pdf_merger import PDFMerger
 from app.services.pdf_compressor import PDFCompressor
@@ -21,24 +19,46 @@ from app.services.ofd_converter import OFDConverter
 from app.services.markdown_converter import OfficeToMarkdownConverter
 from app.services.storage import StorageService
 from app.core.logger import get_logger
-from app.core.exceptions import FileTooLargeError, InvalidFileTypeError
+from app.core.exceptions import FileTooLargeError
+from app.core.file_security import (
+    get_task_dir,
+    make_task_dir,
+    safe_join,
+    save_upload_file,
+    validate_file_header,
+    validate_extension,
+)
 
 router = APIRouter()
 logger = get_logger(__name__)
 
-TEMP_DIR = "/app/temp" if os.path.exists("/app/temp") else "./temp"
+TEMP_DIR = os.path.abspath("/app/temp" if os.path.exists("/app/temp") else "./temp")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 storage = StorageService()
+
+PDF_EXTENSIONS = (".pdf",)
+WORD_EXTENSIONS = (".docx", ".doc")
+PPT_EXTENSIONS = (".pptx", ".ppt")
+EXCEL_EXTENSIONS = (".xlsx", ".xls")
+OFD_EXTENSIONS = (".ofd",)
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 
 def validate_pdf(file: UploadFile):
     if file.size and file.size > settings.MAX_UPLOAD_SIZE:
         raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
-    if file.content_type != "application/pdf":
-        # Fallback: check extension
-        if not file.filename or not file.filename.lower().endswith(".pdf"):
-            raise InvalidFileTypeError()
+    suffix = validate_extension(file.filename, PDF_EXTENSIONS)
+    validate_file_header(file, suffix)
+
+
+def save_pdf(file: UploadFile, task_dir: str, filename: str = "input.pdf") -> str:
+    return save_upload_file(
+        file,
+        safe_join(task_dir, filename),
+        settings.MAX_UPLOAD_SIZE,
+        PDF_EXTENSIONS,
+    )
 
 
 @router.post("/split", response_model=TaskResponse, summary="Split a PDF file")
@@ -48,13 +68,9 @@ async def split_pdf(
     value: str = Form(""),
 ):
     validate_pdf(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.pdf")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_pdf(file, task_dir)
 
     try:
         splitter = PDFSplitter(input_path)
@@ -64,7 +80,7 @@ async def split_pdf(
         if len(output_paths) == 1:
             final_path = output_paths[0]
         else:
-            final_path = os.path.join(task_dir, f"{task_id}.zip")
+            final_path = safe_join(task_dir, f"{task_id}.zip")
             import zipfile
 
             with zipfile.ZipFile(final_path, "w") as zf:
@@ -98,20 +114,16 @@ async def merge_pdf(
             detail=f"Maximum {settings.MAX_FILES_PER_REQUEST} files allowed",
         )
 
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
     input_paths = []
     for f in files:
         validate_pdf(f)
-        path = os.path.join(task_dir, f.filename or f"input_{len(input_paths)}.pdf")
-        with open(path, "wb") as out:
-            shutil.copyfileobj(f.file, out)
+        path = save_pdf(f, task_dir, f"input_{len(input_paths)}.pdf")
         input_paths.append(path)
 
     try:
-        output_path = os.path.join(task_dir, "merged.pdf")
+        output_path = safe_join(task_dir, "merged.pdf")
         merger = PDFMerger(input_paths)
         merger.merge(output_path)
 
@@ -144,12 +156,11 @@ async def merge_batch(
     This endpoint accumulates files and triggers merge on the last upload.
     """
     validate_pdf(file)
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_dir = get_task_dir(TEMP_DIR, task_id, create=True)
+    if total < 1 or total > settings.MAX_FILES_PER_REQUEST or index < 0 or index >= total:
+        raise HTTPException(status_code=400, detail="\u4e0a\u4f20\u5e8f\u53f7\u65e0\u6548")
 
-    input_path = os.path.join(task_dir, f"{index}.pdf")
-    with open(input_path, "wb") as out:
-        shutil.copyfileobj(file.file, out)
+    input_path = save_pdf(file, task_dir, f"{index}.pdf")
 
     logger.info(f"Merge-batch task {task_id}: received file {index + 1}/{total}")
 
@@ -168,8 +179,8 @@ async def merge_batch(
 
     # All files received, perform merge
     try:
-        input_paths = [os.path.join(task_dir, f"{i}.pdf") for i in range(total)]
-        output_path = os.path.join(task_dir, "merged.pdf")
+        input_paths = [safe_join(task_dir, f"{i}.pdf") for i in range(total)]
+        output_path = safe_join(task_dir, "merged.pdf")
         merger = PDFMerger(input_paths)
         merger.merge(output_path)
 
@@ -203,16 +214,12 @@ async def protect_pdf(
         raise HTTPException(status_code=400, detail="密码长度至少为 6 位")
 
     validate_pdf(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.pdf")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_pdf(file, task_dir)
 
     try:
-        output_path = os.path.join(task_dir, "protected.pdf")
+        output_path = safe_join(task_dir, "protected.pdf")
         protector = PDFProtector(input_path)
         protector.protect(
             output_path=output_path,
@@ -244,13 +251,9 @@ async def protect_pdf(
 @router.post("/analyze", summary="Analyze a PDF file and return page count")
 async def analyze_pdf(file: UploadFile = File(...)):
     validate_pdf(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, "input.pdf")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_pdf(file, task_dir)
 
     try:
         remover = PDFPageRemover(input_path)
@@ -270,12 +273,12 @@ async def remove_pages(
     task_id: str = Form(...),
     pages: str = Form(...),
 ):
-    task_dir = os.path.join(TEMP_DIR, task_id)
+    task_dir = get_task_dir(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
 
     # 明确使用 analyze 接口保存的原始文件
-    input_path = os.path.join(task_dir, "input.pdf")
+    input_path = safe_join(task_dir, "input.pdf")
     if not os.path.exists(input_path):
         raise HTTPException(status_code=404, detail="未找到 PDF 文件，请重新上传")
 
@@ -289,7 +292,7 @@ async def remove_pages(
         if len(pages_to_remove) >= total_pages:
             raise HTTPException(status_code=400, detail="不能删除所有页面，至少需要保留一页")
 
-        output_path = os.path.join(task_dir, "removed.pdf")
+        output_path = safe_join(task_dir, "removed.pdf")
         remaining = remover.remove_pages(pages_to_remove, output_path)
 
         # 删除原文件，避免下载接口 fallback 时返回原文件
@@ -319,16 +322,12 @@ async def compress_pdf(
     level: str = Form("normal"),
 ):
     validate_pdf(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.pdf")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_pdf(file, task_dir)
 
     try:
-        output_path = os.path.join(task_dir, "compressed.pdf")
+        output_path = safe_join(task_dir, "compressed.pdf")
         compressor = PDFCompressor(input_path)
         compressor.compress(output_path, level=level)
 
@@ -362,16 +361,12 @@ async def pdf_to_word(
     pages: str = Form("all"),
 ):
     validate_pdf(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.pdf")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_pdf(file, task_dir)
 
     try:
-        output_path = os.path.join(task_dir, "converted.docx")
+        output_path = safe_join(task_dir, "converted.docx")
         converter = PDFToWordConverter()
         info = converter.convert(
             input_path, output_path,
@@ -399,16 +394,12 @@ async def pdf_to_markdown(
     pages: str = Form("all"),
 ):
     validate_pdf(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.pdf")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_pdf(file, task_dir)
 
     try:
-        output_path = os.path.join(task_dir, "output.md")
+        output_path = safe_join(task_dir, "output.md")
         converter = PDFToMarkdownConverter()
         info = converter.convert(input_path, output_path, pages=pages if pages != "all" else None)
 
@@ -427,45 +418,41 @@ async def pdf_to_markdown(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def validate_word(file: UploadFile):
+def validate_upload(file: UploadFile, allowed_extensions: tuple[str, ...]):
     if file.size and file.size > settings.MAX_UPLOAD_SIZE:
         raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
-    if file.content_type not in (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/msword",
-    ):
-        if not file.filename or not file.filename.lower().endswith((".docx", ".doc")):
-            raise InvalidFileTypeError()
+    suffix = validate_extension(file.filename, allowed_extensions)
+    validate_file_header(file, suffix)
+
+
+def validate_word(file: UploadFile):
+    validate_upload(file, WORD_EXTENSIONS)
 
 
 def validate_ppt(file: UploadFile):
-    if file.size and file.size > settings.MAX_UPLOAD_SIZE:
-        raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
-    if file.content_type not in (
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "application/vnd.ms-powerpoint",
-    ):
-        if not file.filename or not file.filename.lower().endswith((".pptx", ".ppt")):
-            raise InvalidFileTypeError()
+    validate_upload(file, PPT_EXTENSIONS)
 
 
 def validate_excel(file: UploadFile):
-    if file.size and file.size > settings.MAX_UPLOAD_SIZE:
-        raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
-    if file.content_type not in (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-excel",
-    ):
-        if not file.filename or not file.filename.lower().endswith((".xlsx", ".xls")):
-            raise InvalidFileTypeError()
+    validate_upload(file, EXCEL_EXTENSIONS)
 
 
 def validate_ofd(file: UploadFile):
-    if file.size and file.size > settings.MAX_UPLOAD_SIZE:
-        raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
-    if file.content_type != "application/ofd":
-        if not file.filename or not file.filename.lower().endswith(".ofd"):
-            raise InvalidFileTypeError()
+    validate_upload(file, OFD_EXTENSIONS)
+
+
+def save_upload_by_type(
+    file: UploadFile,
+    task_dir: str,
+    filename: str,
+    allowed_extensions: tuple[str, ...],
+) -> str:
+    return save_upload_file(
+        file,
+        safe_join(task_dir, filename),
+        settings.MAX_UPLOAD_SIZE,
+        allowed_extensions,
+    )
 
 
 @router.post("/word-to-pdf", response_model=TaskResponse, summary="Convert a Word document to PDF")
@@ -473,16 +460,12 @@ async def word_to_pdf(
     file: UploadFile = File(...),
 ):
     validate_word(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.docx")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_upload_by_type(file, task_dir, "input.docx", WORD_EXTENSIONS)
 
     try:
-        output_path = os.path.join(task_dir, "converted.pdf")
+        output_path = safe_join(task_dir, "converted.pdf")
         converter = WordConverter(input_path)
         converter.convert(output_path)
 
@@ -506,16 +489,12 @@ async def ppt_to_pdf(
     file: UploadFile = File(...),
 ):
     validate_ppt(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.pptx")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_upload_by_type(file, task_dir, "input.pptx", PPT_EXTENSIONS)
 
     try:
-        output_path = os.path.join(task_dir, "converted.pdf")
+        output_path = safe_join(task_dir, "converted.pdf")
         converter = WordConverter(input_path)
         converter.convert(output_path)
 
@@ -541,13 +520,9 @@ async def pdf_to_jpg(
     pages: str = Form("all"),
 ):
     validate_pdf(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.pdf")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_pdf(file, task_dir)
 
     try:
         converter = PDFToImageConverter(input_path)
@@ -561,7 +536,7 @@ async def pdf_to_jpg(
             final_path = image_paths[0]
             download_url = f"/api/v1/pdf/download/{task_id}"
         else:
-            final_path = os.path.join(task_dir, "images.zip")
+            final_path = safe_join(task_dir, "images.zip")
             PDFToImageConverter.zip_images(image_paths, final_path)
             download_url = f"/api/v1/pdf/download/{task_id}"
 
@@ -583,16 +558,12 @@ async def ofd_to_pdf(
     file: UploadFile = File(...),
 ):
     validate_ofd(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.ofd")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_upload_by_type(file, task_dir, "input.ofd", OFD_EXTENSIONS)
 
     try:
-        output_path = os.path.join(task_dir, "converted.pdf")
+        output_path = safe_join(task_dir, "converted.pdf")
         converter = OFDConverter()
         success, result = converter.ofd_to_pdf(input_path, output_path)
 
@@ -621,16 +592,12 @@ async def word_to_markdown(
     file: UploadFile = File(...),
 ):
     validate_word(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.docx")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_upload_by_type(file, task_dir, "input.docx", WORD_EXTENSIONS)
 
     try:
-        output_path = os.path.join(task_dir, "converted.md")
+        output_path = safe_join(task_dir, "converted.md")
         converter = OfficeToMarkdownConverter()
         info = converter.convert(input_path, output_path)
 
@@ -654,16 +621,12 @@ async def ppt_to_markdown(
     file: UploadFile = File(...),
 ):
     validate_ppt(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.pptx")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_upload_by_type(file, task_dir, "input.pptx", PPT_EXTENSIONS)
 
     try:
-        output_path = os.path.join(task_dir, "converted.md")
+        output_path = safe_join(task_dir, "converted.md")
         converter = OfficeToMarkdownConverter()
         info = converter.convert(input_path, output_path)
 
@@ -687,16 +650,12 @@ async def excel_to_markdown(
     file: UploadFile = File(...),
 ):
     validate_excel(file)
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = os.path.join(task_dir, file.filename or "input.xlsx")
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    input_path = save_upload_by_type(file, task_dir, "input.xlsx", EXCEL_EXTENSIONS)
 
     try:
-        output_path = os.path.join(task_dir, "converted.md")
+        output_path = safe_join(task_dir, "converted.md")
         converter = OfficeToMarkdownConverter()
         info = converter.convert(input_path, output_path)
 
@@ -727,21 +686,21 @@ async def jpg_to_pdf(
             detail=f"Maximum {settings.MAX_FILES_PER_REQUEST} files allowed",
         )
 
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
     input_paths = []
     for f in files:
-        if f.size and f.size > settings.MAX_UPLOAD_SIZE:
-            raise FileTooLargeError(settings.MAX_UPLOAD_SIZE)
-        path = os.path.join(task_dir, f.filename or f"input_{len(input_paths)}.jpg")
-        with open(path, "wb") as out:
-            shutil.copyfileobj(f.file, out)
+        suffix = validate_extension(f.filename, IMAGE_EXTENSIONS)
+        path = save_upload_file(
+            f,
+            safe_join(task_dir, f"input_{len(input_paths)}{suffix}"),
+            settings.MAX_UPLOAD_SIZE,
+            IMAGE_EXTENSIONS,
+        )
         input_paths.append(path)
 
     try:
-        output_path = os.path.join(task_dir, "images.pdf")
+        output_path = safe_join(task_dir, "images.pdf")
         converter = ImageToPDFConverter()
         converter.convert(
             image_paths=input_paths,
@@ -767,7 +726,7 @@ async def jpg_to_pdf(
 
 @router.get("/download/{task_id}", summary="Download processed file")
 async def download_file(task_id: str):
-    task_dir = os.path.join(TEMP_DIR, task_id)
+    task_dir = get_task_dir(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="Task not found or expired")
 
@@ -787,7 +746,7 @@ async def download_file(task_id: str):
         ("images.zip", "images.zip"),
     ]
     for c, download_name in candidates:
-        path = os.path.join(task_dir, c)
+        path = safe_join(task_dir, c)
         if os.path.exists(path):
             return FileResponse(
                 path,
@@ -800,7 +759,7 @@ async def download_file(task_id: str):
         if f.endswith((".pdf", ".zip")):
             download_name = "result.zip" if f.endswith(".zip") else "result.pdf"
             return FileResponse(
-                os.path.join(task_dir, f),
+                safe_join(task_dir, f),
                 media_type="application/octet-stream",
                 filename=download_name,
             )

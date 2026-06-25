@@ -1,6 +1,4 @@
 import os
-import uuid
-import shutil
 from typing import List
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
@@ -8,16 +6,17 @@ from fastapi.responses import FileResponse
 from app.models.schemas import TaskResponse
 from app.services.invoice_merger import InvoiceMerger
 from app.core.logger import get_logger
-from app.core.exceptions import FileTooLargeError
+from app.core.file_security import get_task_dir, make_task_dir, safe_join, save_upload_file
 
 router = APIRouter()
 logger = get_logger(__name__)
 
-TEMP_DIR = "/app/temp" if os.path.exists("/app/temp") else "./temp"
+TEMP_DIR = os.path.abspath("/app/temp" if os.path.exists("/app/temp") else "./temp")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 MAX_INVOICE_FILES = 50
 MAX_INVOICE_SIZE = 10 * 1024 * 1024  # 10MB per file
+PDF_EXTENSIONS = (".pdf",)
 
 
 @router.post("/analyze", summary="Analyze uploaded invoice PDFs and return dimensions")
@@ -30,21 +29,19 @@ async def analyze_invoices(
             detail=f"最多上传 {MAX_INVOICE_FILES} 张发票",
         )
 
-    task_id = str(uuid.uuid4())
-    task_dir = os.path.join(TEMP_DIR, task_id)
-    os.makedirs(task_dir, exist_ok=True)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
 
     saved_paths = []
-    for f in files:
-        if f.size and f.size > MAX_INVOICE_SIZE:
-            raise FileTooLargeError(MAX_INVOICE_SIZE)
-        if not f.filename or not f.filename.lower().endswith(".pdf"):
-            raise HTTPException(status_code=415, detail="仅支持 PDF 格式的发票")
-
-        path = os.path.join(task_dir, f.filename)
-        with open(path, "wb") as out:
-            shutil.copyfileobj(f.file, out)
+    original_names = []
+    for index, f in enumerate(files):
+        path = save_upload_file(
+            f,
+            safe_join(task_dir, f"invoice_{index + 1:03d}.pdf"),
+            MAX_INVOICE_SIZE,
+            PDF_EXTENSIONS,
+        )
         saved_paths.append(path)
+        original_names.append(f.filename or f"invoice_{index + 1:03d}.pdf")
 
     try:
         merger = InvoiceMerger()
@@ -54,12 +51,12 @@ async def analyze_invoices(
             "task_id": task_id,
             "invoices": [
                 {
-                    "filename": info.filename,
+                    "filename": original_names[idx] if idx < len(original_names) else info.filename,
                     "width": round(info.original_width, 1),
                     "height": round(info.original_height, 1),
                     "page_count": info.page_count,
                 }
-                for info in infos
+                for idx, info in enumerate(infos)
             ],
             "total_count": len(infos),
         }
@@ -76,13 +73,13 @@ async def merge_invoices(
     crop_marks: bool = Form(True),
     page_numbers: bool = Form(True),
 ):
-    task_dir = os.path.join(TEMP_DIR, task_id)
+    task_dir = get_task_dir(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
 
     # Collect all PDF files in task dir
     pdf_paths = [
-        os.path.join(task_dir, f)
+        safe_join(task_dir, f)
         for f in os.listdir(task_dir)
         if f.lower().endswith(".pdf")
     ]
@@ -94,7 +91,7 @@ async def merge_invoices(
         merger = InvoiceMerger()
         merger.analyze(pdf_paths)
 
-        output_path = os.path.join(task_dir, "merged_invoices.pdf")
+        output_path = safe_join(task_dir, "merged_invoices.pdf")
         info = merger.merge(
             output_path=output_path,
             per_page=per_page,
@@ -122,11 +119,11 @@ async def merge_invoices(
 
 @router.get("/download/{task_id}", summary="Download merged invoice PDF")
 async def download_merged(task_id: str, preview: bool = False):
-    task_dir = os.path.join(TEMP_DIR, task_id)
+    task_dir = get_task_dir(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="任务不存在或已过期")
 
-    output_path = os.path.join(task_dir, "merged_invoices.pdf")
+    output_path = safe_join(task_dir, "merged_invoices.pdf")
     if not os.path.exists(output_path):
         raise HTTPException(status_code=404, detail="输出文件不存在")
 
