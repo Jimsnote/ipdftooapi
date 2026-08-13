@@ -1,41 +1,22 @@
 ﻿from io import BytesIO
 import os
-import sys
 import tempfile
-import types
 import unittest
 from uuid import uuid4
 
+from fastapi import HTTPException as FastAPIHTTPException
 
-class FakeHTTPException(Exception):
-    def __init__(self, status_code: int, detail: str):
-        super().__init__(detail)
-        self.status_code = status_code
-        self.detail = detail
-
-
-class FakeStatus:
-    HTTP_400_BAD_REQUEST = 400
-    HTTP_413_REQUEST_ENTITY_TOO_LARGE = 413
-    HTTP_415_UNSUPPORTED_MEDIA_TYPE = 415
-    HTTP_422_UNPROCESSABLE_ENTITY = 422
+from app.core.exceptions import InvalidFileTypeError
+from app.core.file_security import get_task_dir, safe_join, save_upload_file, validate_uuid
 
 
 class FakeUploadFile:
+    """轻量 UploadFile 替身，仅用于 save_upload_file 测试。"""
+
     def __init__(self, filename: str, file: BytesIO, size: int | None = None):
         self.filename = filename
         self.file = file
         self.size = size
-
-
-fake_fastapi = types.ModuleType("fastapi")
-fake_fastapi.HTTPException = FakeHTTPException
-fake_fastapi.UploadFile = FakeUploadFile
-fake_fastapi.status = FakeStatus
-sys.modules.setdefault("fastapi", fake_fastapi)
-
-from app.core.exceptions import InvalidFileTypeError
-from app.core.file_security import get_task_dir, safe_join, save_upload_file, validate_uuid
 
 
 class FileSecurityTestCase(unittest.TestCase):
@@ -43,7 +24,7 @@ class FileSecurityTestCase(unittest.TestCase):
         return FakeUploadFile(filename=filename, file=BytesIO(content), size=len(content))
 
     def test_validate_uuid_rejects_non_uuid_task_id(self):
-        with self.assertRaises(FakeHTTPException) as ctx:
+        with self.assertRaises(FastAPIHTTPException) as ctx:
             validate_uuid("../temp")
         self.assertEqual(ctx.exception.status_code, 400)
 
@@ -56,7 +37,7 @@ class FileSecurityTestCase(unittest.TestCase):
 
     def test_safe_join_rejects_path_escape(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            with self.assertRaises(FakeHTTPException) as ctx:
+            with self.assertRaises(FastAPIHTTPException) as ctx:
                 safe_join(temp_dir, "..", "escape.pdf")
             self.assertEqual(ctx.exception.status_code, 400)
 
