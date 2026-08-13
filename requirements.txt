@@ -4,6 +4,7 @@ gunicorn==21.2.0
 python-multipart==0.0.9
 pydantic==2.6.0
 pydantic-settings==2.1.0
+httpx<0.28               # TestClient 依赖：starlette 0.36 的 TestClient 需 httpx<0.28，否则报 app 参数错误
 pypdf==4.0.0
 pymupdf4llm>=0.0.17
 # Tencent Cloud COS SDK
