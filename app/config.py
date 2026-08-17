@@ -48,5 +48,11 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
     MAX_FILES_PER_REQUEST: int = 20
 
+    # OCR
+    OCR_MAX_SIZE: int = 20 * 1024 * 1024  # 20MB
+    OCR_MAX_PAGES: int = 10
+    OCR_MIN_IMG_DIM: int = 200
+    OCR_ENGINE: str = "onnxruntime"  # "onnxruntime" (Linux) | "mkldnn_false" (Windows local test)
+
 
 settings = Settings()
