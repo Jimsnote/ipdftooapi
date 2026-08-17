@@ -11,7 +11,7 @@ pymupdf4llm>=0.0.17
 qcloud-python-sts==3.1.5
 cos-python-sdk-v5==1.9.28
 pillow==10.2.0            # Image processing / ID photo rendering
-easyofd>=0.5.6            # OFD parsing and conversion (OFD <-> PDF)
+easyofd==20260427       # OFD parsing and conversion; 锁定版本：25/9 MediaBox 行为/页级尺寸优先等结论绑定该版本（本地与生产实测一致），升级前须重跑 OFD_INVOICE_MERGE_DESIGN.md §9 PoC
 numpy>=1.24.0             # easyofd dependency
 reportlab>=3.6.0          # easyofd dependency
 
