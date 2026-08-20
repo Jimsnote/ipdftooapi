@@ -46,8 +46,8 @@ def _load_font(size_px: float) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _mm_to_px(mm: float) -> int:
-    return int(round(mm * DPI / 25.4))
+def _mm_to_px(mm: float, ppmm: float = DPI / 25.4) -> int:
+    return int(round(mm * ppmm))
 
 
 def _parse_base64(src: str) -> bytes:
@@ -68,16 +68,18 @@ def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
     return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
 
 
-def _compute_a4_size(orientation: str) -> Tuple[int, int]:
+def _compute_a4_size(orientation: str, ppmm: float) -> Tuple[int, int]:
     if orientation == "landscape":
-        return (_mm_to_px(A4_HEIGHT_MM), _mm_to_px(A4_WIDTH_MM))
-    return (_mm_to_px(A4_WIDTH_MM), _mm_to_px(A4_HEIGHT_MM))
+        return (_mm_to_px(A4_HEIGHT_MM, ppmm), _mm_to_px(A4_WIDTH_MM, ppmm))
+    return (_mm_to_px(A4_WIDTH_MM, ppmm), _mm_to_px(A4_HEIGHT_MM, ppmm))
 
 
 class IDPhotoRenderer:
-    def __init__(self, orientation: str = "portrait"):
+    def __init__(self, orientation: str = "portrait", dpi: int = 300):
         self.orientation = orientation
-        self.width_px, self.height_px = _compute_a4_size(orientation)
+        self.dpi = dpi
+        self.ppmm = dpi / 25.4
+        self.width_px, self.height_px = _compute_a4_size(orientation, self.ppmm)
         self.canvas = Image.new("RGB", (self.width_px, self.height_px), "white")
         self.draw = ImageDraw.Draw(self.canvas)
 
@@ -85,7 +87,7 @@ class IDPhotoRenderer:
         if not watermark.enabled or not watermark.text:
             return
 
-        font_size_px = max(1, _mm_to_px(watermark.font_size))
+        font_size_px = max(1, _mm_to_px(watermark.font_size, self.ppmm))
         font = _load_font(font_size_px)
         text = watermark.text
         rgb = _hex_to_rgb(watermark.color)
@@ -137,28 +139,40 @@ class IDPhotoRenderer:
             logger.warning(f"Failed to decode image {img.id}: {e}")
             return
 
-        w_px = max(1, _mm_to_px(img.width))
-        h_px = max(1, _mm_to_px(img.height))
+        w_px = max(1, _mm_to_px(img.width, self.ppmm))
+        h_px = max(1, _mm_to_px(img.height, self.ppmm))
 
-        # cover：先按目标宽高比居中裁剪源图，避免一寸照被拉变形
+        # cover：先按目标宽高比居中裁剪源图，避免一寸照被拉变形；
+        # 再按 crop_zoom / crop_x / crop_y 做规格内构图（放大裁剪 + 平移）。
         if img.cover:
             src_w, src_h = source.size
             target_aspect = w_px / h_px
             src_aspect = src_w / src_h
             if src_aspect > target_aspect:
-                cw = int(round(src_h * target_aspect))
+                cw = src_h * target_aspect
                 ch = src_h
-                cx = (src_w - cw) // 2
-                box = (cx, 0, cx + cw, src_h)
+                cx = (src_w - cw) / 2.0
+                cy = 0.0
             else:
-                ch = int(round(src_w / target_aspect))
+                ch = src_w / target_aspect
                 cw = src_w
-                cy = (src_h - ch) // 2
-                box = (0, cy, src_w, cy + ch)
+                cx = 0.0
+                cy = (src_h - ch) / 2.0
+            z = img.crop_zoom or 1.0
+            if z != 1.0:
+                nw = cw / z
+                nh = ch / z
+                px = img.crop_x or 0.0
+                py = img.crop_y or 0.0
+                cx = cx + (cw - nw) / 2.0 + px * (cw - nw)
+                cy = cy + (ch - nh) / 2.0 + py * (ch - nh)
+                cw = nw
+                ch = nh
+            box = (int(round(cx)), int(round(cy)), int(round(cx + cw)), int(round(cy + ch)))
             source = source.crop(box)
 
-        x_px = _mm_to_px(img.x)
-        y_px = _mm_to_px(img.y)
+        x_px = _mm_to_px(img.x, self.ppmm)
+        y_px = _mm_to_px(img.y, self.ppmm)
 
         resized = source.resize((w_px, h_px), Image.LANCZOS)
 
@@ -202,11 +216,11 @@ class IDPhotoRenderer:
             self.canvas.paste(resized, (x_px, y_px), resized)
 
     def _render_text(self, text_obj: CanvasText) -> None:
-        font_size_px = max(1, _mm_to_px(text_obj.font_size))
+        font_size_px = max(1, _mm_to_px(text_obj.font_size, self.ppmm))
         font = _load_font(font_size_px)
         fill = _hex_to_rgb(text_obj.color)
-        x_px = _mm_to_px(text_obj.x)
-        y_px = _mm_to_px(text_obj.y)
+        x_px = _mm_to_px(text_obj.x, self.ppmm)
+        y_px = _mm_to_px(text_obj.y, self.ppmm)
 
         if abs(text_obj.rotation % 360) > 0.1:
             bbox = font.getbbox(text_obj.text)
@@ -249,17 +263,21 @@ class IDPhotoRenderer:
     def _render_cut_lines(self, images: List[CanvasImage]) -> None:
         """在每个图片格子的包围盒上画浅灰虚线矩形，方便打印后裁剪。"""
         color = (150, 150, 150)
-        width = max(1, int(round(DPI / 300 * 0.15)))
+        # 打印可见：至少 2px@300dpi（≈0.17mm），避免 1px 在纸面上几乎看不见
+        scale = self.dpi / 300.0
+        width = max(2, int(round(scale * 0.2)))
+        dash = max(6, int(round(scale * 1.0)))   # 虚线段长 ≈1mm
+        gap = max(4, int(round(scale * 0.6)))    # 间隔 ≈0.6mm
         for img in images:
-            x0 = _mm_to_px(img.x)
-            y0 = _mm_to_px(img.y)
-            x1 = x0 + _mm_to_px(img.width)
-            y1 = y0 + _mm_to_px(img.height)
+            x0 = _mm_to_px(img.x, self.ppmm)
+            y0 = _mm_to_px(img.y, self.ppmm)
+            x1 = x0 + _mm_to_px(img.width, self.ppmm)
+            y1 = y0 + _mm_to_px(img.height, self.ppmm)
             # 四条边，每条用虚线
-            self._draw_dashed_line((x0, y0), (x1, y0), color, width)
-            self._draw_dashed_line((x1, y0), (x1, y1), color, width)
-            self._draw_dashed_line((x1, y1), (x0, y1), color, width)
-            self._draw_dashed_line((x0, y1), (x0, y0), color, width)
+            self._draw_dashed_line((x0, y0), (x1, y0), color, width, dash, gap)
+            self._draw_dashed_line((x1, y0), (x1, y1), color, width, dash, gap)
+            self._draw_dashed_line((x1, y1), (x0, y1), color, width, dash, gap)
+            self._draw_dashed_line((x0, y1), (x0, y0), color, width, dash, gap)
 
     def render(
         self,
@@ -286,7 +304,7 @@ class IDPhotoRenderer:
         self.canvas.save(
             output_path,
             "PDF",
-            resolution=DPI,
+            resolution=self.dpi,
             title="iPDFToo ID Photo Layout",
         )
         return output_path
@@ -295,7 +313,7 @@ class IDPhotoRenderer:
 class IDPhotoRendererService:
     @staticmethod
     def render_to_file(request, output_path: str) -> str:
-        renderer = IDPhotoRenderer(orientation=request.orientation)
+        renderer = IDPhotoRenderer(orientation=request.orientation, dpi=getattr(request, "dpi", 300) or 300)
         renderer.render(
             images=request.images,
             texts=request.texts,

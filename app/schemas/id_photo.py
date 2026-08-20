@@ -14,6 +14,11 @@ class CanvasImage(BaseModel):
     src: Optional[str] = Field(None, description="Base64 image data (data URL or raw base64); omitted when src_ref is used")
     src_ref: Optional[str] = Field(None, description="Reference key into request.source_images for deduplicated storage")
     cover: bool = Field(False, description="When true, center-crop the source to the target aspect ratio (avoid distortion)")
+    # 规格内裁剪 / 构图：在 cover 基础上再做缩放与平移，修正"头大身子小"等构图问题。
+    # crop_zoom > 1 表示放大裁剪（取更小区域）；crop_x/crop_y ∈ [-0.5, 0.5] 表示在 cover 框内平移。
+    crop_zoom: float = Field(1.0, description="Zoom-in factor for in-spec cropping (1 = no zoom)")
+    crop_x: float = Field(0.0, description="Horizontal pan within cover crop box, -0.5..0.5")
+    crop_y: float = Field(0.0, description="Vertical pan within cover crop box, -0.5..0.5")
 
 
 class CanvasText(BaseModel):
@@ -45,3 +50,4 @@ class IDPhotoRenderRequest(BaseModel):
     spec_key: Optional[str] = Field(None, description="Selected ID photo spec key (for record)")
     margin_mm: float = Field(5.0, description="Page margin in mm (used by spec auto-layout)")
     grid_gap_mm: float = Field(2.0, description="Gap between cells in mm (used by spec auto-layout)")
+    dpi: int = Field(300, description="Output DPI for the rendered PDF (300 or 600)")
