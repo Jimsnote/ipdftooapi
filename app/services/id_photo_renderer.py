@@ -138,11 +138,43 @@ class IDPhotoRenderer:
         resized = source.resize((w_px, h_px), Image.LANCZOS)
 
         if abs(img.rotation % 360) > 0.1:
-            rotated = resized.rotate(-img.rotation, expand=True, resample=Image.BICUBIC)
+            # 前端 Konva 绕元素左上角（本地原点）旋转。为避免 PIL 默认 "绕中心旋转 + expand 居中"
+            # 带来的锚点偏移，这里用显式仿射：先绕左上角旋转，再按包围盒平移对齐到 (x_px, y_px)。
+            angle = math.radians(img.rotation)
+            cos_t, sin_t = math.cos(angle), math.sin(angle)
+            # 四个角旋转后（不含平移）的包围盒
+            pts = [(0.0, 0.0), (w_px, 0.0), (w_px, h_px), (0.0, h_px)]
+            proj = [(x * cos_t - y * sin_t, x * sin_t + y * cos_t) for x, y in pts]
+            min_x = min(p[0] for p in proj)
+            max_x = max(p[0] for p in proj)
+            min_y = min(p[1] for p in proj)
+            max_y = max(p[1] for p in proj)
+            out_w = int(math.ceil(max_x - min_x))
+            out_h = int(math.ceil(max_y - min_y))
+            # PIL 的 AFFINE 参数必须是「输出->源」的逆变换矩阵。
+            # 前向（本地->旋转后）：X = x·cosθ - y·sinθ, Y = x·sinθ + y·cosθ
+            # 逆变换（旋转后->本地）：x = X·cosθ + Y·sinθ, y = -X·sinθ + Y·cosθ
+            # 输出像素 (u,v) 对应旋转坐标 (min_x+u, min_y+v)，代入逆变换得到源坐标。
+            rotated = resized.convert("RGBA").transform(
+                (out_w, out_h),
+                Image.AFFINE,
+                (
+                    cos_t,
+                    sin_t,
+                    cos_t * min_x + sin_t * min_y,
+                    -sin_t,
+                    cos_t,
+                    -sin_t * min_x + cos_t * min_y,
+                ),
+            )
+            # 原图左上角最终落在画布 (x_px, y_px)
+            self.canvas.paste(
+                rotated,
+                (int(round(x_px + min_x)), int(round(y_px + min_y))),
+                rotated,
+            )
         else:
-            rotated = resized
-
-        self.canvas.paste(rotated, (x_px, y_px), rotated)
+            self.canvas.paste(resized, (x_px, y_px), resized)
 
     def _render_text(self, text_obj: CanvasText) -> None:
         font_size_px = max(1, _mm_to_px(text_obj.font_size))
