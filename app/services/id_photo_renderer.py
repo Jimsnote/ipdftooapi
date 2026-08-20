@@ -2,7 +2,7 @@ import base64
 import io
 import math
 import os
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -119,9 +119,16 @@ class IDPhotoRenderer:
                 x += step
             y += step
 
-    def _render_image(self, img: CanvasImage) -> None:
+    def _render_image(self, img: CanvasImage, source_images: Optional[Dict[str, str]] = None) -> None:
+        # 解析图片数据：优先 src_ref 去重存储，否则内联 src
+        raw_src = img.src
+        if (not raw_src) and img.src_ref and source_images:
+            raw_src = source_images.get(img.src_ref)
+        if not raw_src:
+            logger.warning(f"Image {img.id} has neither src nor resolvable src_ref, skipped")
+            return
         try:
-            data = _parse_base64(img.src)
+            data = _parse_base64(raw_src)
             _validate_image_header(data)
             source = Image.open(io.BytesIO(data)).convert("RGBA")
         except ValueError:
@@ -132,6 +139,24 @@ class IDPhotoRenderer:
 
         w_px = max(1, _mm_to_px(img.width))
         h_px = max(1, _mm_to_px(img.height))
+
+        # cover：先按目标宽高比居中裁剪源图，避免一寸照被拉变形
+        if img.cover:
+            src_w, src_h = source.size
+            target_aspect = w_px / h_px
+            src_aspect = src_w / src_h
+            if src_aspect > target_aspect:
+                cw = int(round(src_h * target_aspect))
+                ch = src_h
+                cx = (src_w - cw) // 2
+                box = (cx, 0, cx + cw, src_h)
+            else:
+                ch = int(round(src_w / target_aspect))
+                cw = src_w
+                cy = (src_h - ch) // 2
+                box = (0, cy, src_w, cy + ch)
+            source = source.crop(box)
+
         x_px = _mm_to_px(img.x)
         y_px = _mm_to_px(img.y)
 
@@ -197,18 +222,63 @@ class IDPhotoRenderer:
         else:
             self.draw.text((x_px, y_px), text_obj.text, font=font, fill=fill)
 
+    def _draw_dashed_line(
+        self,
+        p0: Tuple[float, float],
+        p1: Tuple[float, float],
+        color,
+        width: int,
+        dash: int = 8,
+        gap: int = 5,
+    ) -> None:
+        """手绘虚线（PIL 的 line 不直接支持 dash，跨版本更稳定）。"""
+        (x0, y0), (x1, y1) = p0, p1
+        dx, dy = x1 - x0, y1 - y0
+        dist = math.hypot(dx, dy)
+        if dist == 0:
+            return
+        ux, uy = dx / dist, dy / dist
+        pos = 0.0
+        while pos < dist:
+            seg_end = min(pos + dash, dist)
+            sx, sy = x0 + ux * pos, y0 + uy * pos
+            ex, ey = x0 + ux * seg_end, y0 + uy * seg_end
+            self.draw.line([(sx, sy), (ex, ey)], fill=color, width=width)
+            pos += dash + gap
+
+    def _render_cut_lines(self, images: List[CanvasImage]) -> None:
+        """在每个图片格子的包围盒上画浅灰虚线矩形，方便打印后裁剪。"""
+        color = (150, 150, 150)
+        width = max(1, int(round(DPI / 300 * 0.15)))
+        for img in images:
+            x0 = _mm_to_px(img.x)
+            y0 = _mm_to_px(img.y)
+            x1 = x0 + _mm_to_px(img.width)
+            y1 = y0 + _mm_to_px(img.height)
+            # 四条边，每条用虚线
+            self._draw_dashed_line((x0, y0), (x1, y0), color, width)
+            self._draw_dashed_line((x1, y0), (x1, y1), color, width)
+            self._draw_dashed_line((x1, y1), (x0, y1), color, width)
+            self._draw_dashed_line((x0, y1), (x0, y0), color, width)
+
     def render(
         self,
         images: List[CanvasImage],
         texts: List[CanvasText],
         tiled_watermark: TiledWatermark,
         output_path: str,
+        source_images: Optional[Dict[str, str]] = None,
+        cut_lines: bool = True,
     ) -> str:
         for img in images:
-            self._render_image(img)
+            self._render_image(img, source_images=source_images)
 
         for txt in texts:
             self._render_text(txt)
+
+        # 裁切虚线在图片/文字之上、平铺水印之下绘制
+        if cut_lines:
+            self._render_cut_lines(images)
 
         # Render tiled watermark on top so it covers photos and text
         self._render_tiled_watermark(tiled_watermark)
@@ -231,5 +301,7 @@ class IDPhotoRendererService:
             texts=request.texts,
             tiled_watermark=request.tiled_watermark,
             output_path=output_path,
+            source_images=request.source_images,
+            cut_lines=request.cut_lines,
         )
         return output_path
