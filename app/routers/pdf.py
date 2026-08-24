@@ -11,6 +11,7 @@ from app.services.pdf_compressor import PDFCompressor
 from app.services.pdf_converter import PDFToMarkdownConverter
 from app.services.word_converter import WordConverter
 from app.services.pdf_to_image import PDFToImageConverter
+from app.services.pdf_image_extractor import PDFImageExtractor
 from app.services.image_to_pdf import ImageToPDFConverter
 from app.services.pdf_protector import PDFProtector
 from app.services.pdf_page_remover import PDFPageRemover
@@ -561,6 +562,40 @@ async def pdf_to_jpg(
         raise_processing_error(e)
 
 
+@router.post("/extract-images", response_model=TaskResponse, summary="Extract embedded images from a PDF")
+async def extract_images(file: UploadFile = File(...)):
+    validate_pdf(file)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
+
+    input_path = save_pdf(file, task_dir)
+
+    try:
+        extractor = PDFImageExtractor(input_path)
+        images = extractor.extract(safe_join(task_dir, "images"))
+
+        if not images:
+            raise HTTPException(
+                status_code=422,
+                detail="未在该 PDF 中找到可提取的图片（可能是纯文字文档）",
+            )
+
+        final_path = safe_join(task_dir, "extracted-images.zip")
+        PDFImageExtractor.zip_images(images, final_path)
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        logger.info(f"Extract-images task {task_id} completed: {len(images)} image(s)")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"已提取 {len(images)} 张图片（原图无损）",
+            download_url=download_url,
+            file_count=len(images),
+        )
+    except Exception as e:
+        logger.error(f"Extract-images task {task_id} failed: {e}")
+        raise_processing_error(e)
+
+
 @router.post("/ofd-to-pdf", response_model=TaskResponse, summary="Convert an OFD file to PDF")
 async def ofd_to_pdf(
     file: UploadFile = File(...),
@@ -752,6 +787,7 @@ async def download_file(task_id: str):
         ("converted.docx", "converted.docx"),
         ("converted.md", "converted.md"),
         ("images.zip", "images.zip"),
+        ("extracted-images.zip", "PDF提取图片.zip"),
     ]
     for c, download_name in candidates:
         path = safe_join(task_dir, c)

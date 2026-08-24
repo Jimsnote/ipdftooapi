@@ -28,6 +28,24 @@ def _pdf_bytes(num_pages: int) -> bytes:
     return buf.getvalue()
 
 
+def _pdf_with_image_bytes() -> bytes:
+    """生成含一张内嵌 PNG 图片的 PDF 字节流（供 extract-images 用）。"""
+    import fitz
+    from PIL import Image
+
+    img = Image.new("RGB", (60, 40), (200, 30, 30))
+    img_buf = io.BytesIO()
+    img.save(img_buf, "PNG")
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_image(fitz.Rect(50, 50, 200, 200), stream=img_buf.getvalue())
+    buf = io.BytesIO()
+    doc.save(buf)
+    doc.close()
+    return buf.getvalue()
+
+
 PDF_3 = _pdf_bytes(3)
 PDF_2 = _pdf_bytes(2)
 
@@ -117,6 +135,29 @@ def test_protect_happy_path(client):
     body = r.json()
     assert body["status"] == "completed"
     assert body["download_url"].startswith("/api/v1/pdf/download/")
+
+
+def test_extract_images_happy_path(client):
+    r = client.post(
+        "/api/v1/pdf/extract-images",
+        files={"file": ("input.pdf", _pdf_with_image_bytes(), "application/pdf")},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "completed"
+    assert body["file_count"] == 1
+
+    dl = client.get(body["download_url"])
+    assert dl.status_code == 200
+    assert dl.content[:2] == b"PK"  # zip 文件头
+
+
+def test_extract_images_no_image_returns_422(client):
+    r = client.post(
+        "/api/v1/pdf/extract-images",
+        files={"file": ("input.pdf", PDF_2, "application/pdf")},
+    )
+    assert r.status_code == 422
 
 
 # ---------- 参数 / 类型校验 ----------
