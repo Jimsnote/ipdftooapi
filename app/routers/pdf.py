@@ -14,6 +14,7 @@ from app.services.pdf_to_image import PDFToImageConverter
 from app.services.pdf_image_extractor import PDFImageExtractor
 from app.services.image_to_pdf import ImageToPDFConverter
 from app.services.pdf_protector import PDFProtector
+from app.services.pdf_unlocker import PDFUnlocker
 from app.services.pdf_page_remover import PDFPageRemover
 from app.services.pdf_to_word import PDFToWordConverter
 from app.services.ofd_converter import OFDConverter
@@ -254,6 +255,42 @@ async def protect_pdf(
         )
     except Exception as e:
         logger.error(f"Protect-PDF task {task_id} failed: {e}")
+        raise_processing_error(e)
+
+
+@router.post("/unlock", response_model=TaskResponse, summary="Remove password protection from a PDF")
+async def unlock_pdf(
+    file: UploadFile = File(...),
+    password: str = Form(""),
+):
+    validate_pdf(file)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
+
+    input_path = save_pdf(file, task_dir)
+
+    try:
+        output_path = safe_join(task_dir, "unlocked.pdf")
+        unlocker = PDFUnlocker(input_path)
+        result = unlocker.unlock(output_path, password=password)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+        message = (
+            "密码保护已解除" if result["was_encrypted"] else "该 PDF 未设置密码，已直接输出原文件"
+        )
+
+        logger.info(f"Unlock-PDF task {task_id} completed: {file.filename} (was_encrypted={result['was_encrypted']})")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=message,
+            download_url=download_url,
+            file_count=1,
+        )
+    except ValueError as e:
+        logger.warning(f"Unlock-PDF task {task_id} rejected: {e}")
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unlock-PDF task {task_id} failed: {e}")
         raise_processing_error(e)
 
 
@@ -780,6 +817,7 @@ async def download_file(task_id: str):
         ("converted.pdf", "converted.pdf"),
         ("images.pdf", "images.pdf"),
         ("protected.pdf", "protected.pdf"),
+        ("unlocked.pdf", "unlocked.pdf"),
         ("removed.pdf", "removed.pdf"),
         ("merged_invoices.pdf", "发票合并打印.pdf"),
         ("output.md", "output.md"),

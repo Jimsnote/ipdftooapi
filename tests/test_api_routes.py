@@ -46,6 +46,16 @@ def _pdf_with_image_bytes() -> bytes:
     return buf.getvalue()
 
 
+def _protected_pdf_bytes(user_pwd: str) -> bytes:
+    """生成带打开密码的 PDF 字节流（供 unlock 用）。"""
+    w = PdfWriter()
+    w.append(io.BytesIO(PDF_2))
+    w.encrypt(user_password=user_pwd, use_128bit=True)
+    buf = io.BytesIO()
+    w.write(buf)
+    return buf.getvalue()
+
+
 PDF_3 = _pdf_bytes(3)
 PDF_2 = _pdf_bytes(2)
 
@@ -158,6 +168,41 @@ def test_extract_images_no_image_returns_422(client):
         files={"file": ("input.pdf", PDF_2, "application/pdf")},
     )
     assert r.status_code == 422
+
+
+def test_unlock_happy_path_with_password(client):
+    r = client.post(
+        "/api/v1/pdf/unlock",
+        files={"file": ("locked.pdf", _protected_pdf_bytes("secret123"), "application/pdf")},
+        data={"password": "secret123"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "completed"
+    assert "解除" in body["message"]
+
+    dl = client.get(body["download_url"])
+    assert dl.status_code == 200
+    assert dl.content[:4] == b"%PDF"
+
+
+def test_unlock_wrong_password_returns_422(client):
+    r = client.post(
+        "/api/v1/pdf/unlock",
+        files={"file": ("locked.pdf", _protected_pdf_bytes("secret123"), "application/pdf")},
+        data={"password": "wrong"},
+    )
+    assert r.status_code == 422
+    assert "密码" in r.json()["detail"]
+
+
+def test_unlock_not_encrypted_passthrough(client):
+    r = client.post(
+        "/api/v1/pdf/unlock",
+        files={"file": ("plain.pdf", PDF_2, "application/pdf")},
+    )
+    assert r.status_code == 200
+    assert "未设置密码" in r.json()["message"]
 
 
 # ---------- 参数 / 类型校验 ----------
