@@ -24,4 +24,5 @@ python-docx==1.1.2      # Word document generation
 # sqlalchemy==2.0.0       # ORM
 # alembic==1.13.0         # Migrations
 markitdown[docx,pptx,xlsx,xls]==0.1.6  # Microsoft Office to Markdown
+openpyxl>=3.1,<4          # 发票批量提取 Excel 导出（此前仅经 markitdown[xlsx] 传递安装，显式声明）
 # psycopg2-binary==2.9.0  # PostgreSQL driver
