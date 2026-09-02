@@ -87,6 +87,26 @@ def validate_file_header(file: UploadFile, suffix: str) -> None:
         raise InvalidFileTypeError()
 
 
+def _record_upload_name(task_dir: str, filename: str | None) -> None:
+    """把原始上传文件名追加记录到任务目录的 upload_names.txt（每行一个）。
+
+    供下载端点把输出文件名还原为「原始文件主干 + 输出扩展名」。
+    记录失败静默忽略，不影响主流程。
+    """
+    try:
+        name = Path(filename or "").name.strip()
+        if not name or name in {".", ".."}:
+            return
+        # 去掉不可打印字符，限制长度，避免异常文件名进入响应头
+        name = "".join(ch for ch in name if ch.isprintable())[:200].strip()
+        if not name:
+            return
+        with open(os.path.join(task_dir, "upload_names.txt"), "a", encoding="utf-8") as f:
+            f.write(name + "\n")
+    except Exception:
+        pass
+
+
 def save_upload_file(
     file: UploadFile,
     destination: str,
@@ -110,6 +130,7 @@ def save_upload_file(
                 if written > max_size:
                     raise FileTooLargeError(max_size)
                 out.write(chunk)
+        _record_upload_name(os.path.dirname(destination), file.filename)
     except Exception:
         if os.path.exists(destination):
             os.remove(destination)

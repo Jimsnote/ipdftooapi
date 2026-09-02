@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import List
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
@@ -818,6 +819,11 @@ async def download_file(task_id: str):
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="Task not found or expired")
 
+    # 单文件上传时，用「原始文件主干 + 输出扩展名」作为下载名，
+    # 而不是 converted.pdf 这类机器名（服务端 Content-Disposition
+    # 优先级高于前端 <a download> 属性，必须在服务端改名）
+    original_stem = _read_single_upload_stem(task_dir)
+
     # Find the output file (zip or single pdf)
     candidates = [
         ("merged.pdf", "merged.pdf"),
@@ -841,7 +847,7 @@ async def download_file(task_id: str):
             return FileResponse(
                 path,
                 media_type="application/octet-stream",
-                filename=download_name,
+                filename=_derive_download_name(download_name, original_stem),
             )
 
     # Fallback: first pdf/zip in dir
@@ -851,7 +857,40 @@ async def download_file(task_id: str):
             return FileResponse(
                 safe_join(task_dir, f),
                 media_type="application/octet-stream",
-                filename=download_name,
+                filename=_derive_download_name(download_name, original_stem),
             )
 
     raise HTTPException(status_code=404, detail="Output file not found")
+
+
+# 泛用的机器输出名：单文件上传时替换为原始文件名主干
+_GENERIC_OUTPUT_STEMS = {
+    "converted", "merged", "compressed", "images", "output",
+    "protected", "unlocked", "removed", "result",
+}
+
+
+def _read_single_upload_stem(task_dir: str) -> str | None:
+    """读取任务目录的 upload_names.txt；仅当恰好记录了一个文件时返回其主干名。"""
+    names_path = safe_join(task_dir, "upload_names.txt")
+    if not os.path.exists(names_path):
+        return None
+    try:
+        with open(names_path, encoding="utf-8") as f:
+            names = [ln.strip() for ln in f if ln.strip()]
+        if len(names) != 1:
+            return None
+        stem = Path(names[0]).stem.strip()
+        return stem or None
+    except Exception:
+        return None
+
+
+def _derive_download_name(download_name: str, original_stem: str | None) -> str:
+    """把泛用输出名（converted.pdf 等）换成「原始文件主干 + 扩展名」。"""
+    if not original_stem:
+        return download_name
+    base = Path(download_name).stem
+    if base in _GENERIC_OUTPUT_STEMS:
+        return original_stem + Path(download_name).suffix
+    return download_name
