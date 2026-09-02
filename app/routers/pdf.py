@@ -648,7 +648,15 @@ async def ofd_to_pdf(
         success, result = converter.ofd_to_pdf(input_path, output_path)
 
         if not success:
-            raise HTTPException(status_code=422, detail=f"OFD 转换失败: {result}")
+            logger.error(f"OFD-to-PDF task {task_id} failed: {result}")
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"OFD 转换失败：{result or '未知错误'}。"
+                    "该文件可能包含不受支持的电子签章或版式特性，"
+                    "请确认其为标准 OFD 文件后重试。"
+                ),
+            )
 
         download_url = f"/api/v1/pdf/download/{task_id}"
 

@@ -1,5 +1,6 @@
 import base64
 import os
+import traceback
 from typing import Tuple
 
 from easyofd.ofd import OFD
@@ -7,6 +8,51 @@ from easyofd.ofd import OFD
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _patch_easyofd_signature_assert() -> None:
+    """
+    修复 easyofd==20260427 对「有签名值但无骑缝章」OFD 的崩溃缺陷。
+
+    缺陷链路（easyofd/parser_ofd/ofd_parser.py）：
+        1. SignatureFileParser.__call__ 只有在 XML 里找到 <ofd:StampAnnot>
+           时才填充结果 dict，否则返回空 dict {}；
+        2. ofd_parser.py 第 ~340 行随后执行
+               SignedValue = signatures_info.get("SignedValue")   # -> None
+               self.get_xml_obj(SignedValue)                       # -> assert label 抛错
+        3. get_xml_obj 开头是裸断言 `assert label`，对 None 抛无消息
+           AssertionError()，调用方 str(e) 得到空串，前端只显示
+           “OFD 转换失败: ”（一片空白），无法排障。
+
+    触发条件：OFD 含 <ofd:Signatures>，且 Signature.xml 只有
+    <ofd:SignedInfo>/<ofd:SignedValue> 而没有 <ofd:StampAnnot>。
+    铁路 12306 电子发票（Provider=ChinaRailway12306）等即属此类。
+
+    修复：给 get_xml_obj 加空值保护——label 为空时返回 ""，这与该函数
+    「找不到就返回空串」的既有契约一致，签名信息缺失不影响版式转换结果。
+    """
+    try:
+        from easyofd.parser_ofd.ofd_parser import OFDParser
+    except Exception as e:  # pragma: no cover - 依赖缺失时不应阻断应用启动
+        logger.warning(f"easyofd OFDParser 导入失败，跳过签名兼容补丁: {e}")
+        return
+
+    if getattr(OFDParser.get_xml_obj, "_ipdftoo_patched", False):
+        return
+
+    original_get_xml_obj = OFDParser.get_xml_obj
+
+    def get_xml_obj_safe(self, label):
+        if not label:
+            return ""
+        return original_get_xml_obj(self, label)
+
+    get_xml_obj_safe._ipdftoo_patched = True
+    OFDParser.get_xml_obj = get_xml_obj_safe
+    logger.info("已应用 easyofd 签名兼容补丁（无 StampAnnot 的 SignedValue 空值保护）")
+
+
+_patch_easyofd_signature_assert()
 
 
 class OFDConverter:
@@ -38,13 +84,16 @@ class OFDConverter:
             return True, output_path
 
         except Exception as e:
-            logger.error(f"OFD 转 PDF 失败: {e}")
+            # 记录完整堆栈：easyofd 会抛无消息异常（如裸 assert），
+            # 只记 str(e) 会得到空串，线上将无法排障。
+            logger.error(f"OFD 转 PDF 失败: {e!r}\n{traceback.format_exc()}")
             # 确保内存释放
             try:
                 self._ofd.del_data()
             except Exception:
                 pass
-            return False, str(e)
+            # str(e) 可能为空串，回退到异常类名，保证调用方能拿到可读信息
+            return False, str(e) or type(e).__name__
 
     def ofd_to_images(self, input_path: str, output_dir: str) -> Tuple[bool, list]:
         """
@@ -75,7 +124,7 @@ class OFDConverter:
             return True, saved_paths
 
         except Exception as e:
-            logger.error(f"OFD 转图片失败: {e}")
+            logger.error(f"OFD 转图片失败: {e!r}\n{traceback.format_exc()}")
             try:
                 self._ofd.del_data()
             except Exception:
