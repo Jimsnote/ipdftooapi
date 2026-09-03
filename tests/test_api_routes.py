@@ -91,7 +91,7 @@ def test_health_ok(client):
 def test_split_happy_path(client):
     r = client.post(
         "/api/v1/pdf/split",
-        files={"file": ("input.pdf", PDF_3, "application/pdf")},
+        files={"file": ("myreport.pdf", PDF_3, "application/pdf")},
         data={"mode": "all"},
     )
     assert r.status_code == 200
@@ -104,6 +104,28 @@ def test_split_happy_path(client):
     dl = client.get(body["download_url"])
     assert dl.status_code == 200
     assert dl.content[:2] == b"PK"  # zip 文件头
+    # 下载文件名 = 原始上传文件主干 + .zip（而非 split-result.zip）
+    assert 'filename="myreport.zip"' in dl.headers["content-disposition"]
+
+
+def test_split_zip_download_name_matches_upload_chinese(client):
+    """拆分包下载名与上传文件名一致（中文名，RFC 5987 filename* 编码）。"""
+    r = client.post(
+        "/api/v1/pdf/split",
+        files={"file": ("季度报告.pdf", PDF_3, "application/pdf")},
+        data={"mode": "all"},
+    )
+    assert r.status_code == 200
+    dl = client.get(r.json()["download_url"])
+    assert dl.status_code == 200
+    assert dl.content[:2] == b"PK"
+    disp = dl.headers["content-disposition"]
+    # ASCII 通道应回退为 zip 通用名，UTF-8 通道携带原始主干
+    assert "filename*=utf-8''" in disp
+    from urllib.parse import unquote
+
+    utf8_name = unquote(disp.split("utf-8''", 1)[1].split(";")[0].strip('" '))
+    assert utf8_name == "季度报告.zip"
 
 
 def test_merge_happy_path(client):

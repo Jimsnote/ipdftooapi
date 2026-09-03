@@ -866,7 +866,7 @@ async def download_file(task_id: str):
 # 泛用的机器输出名：单文件上传时替换为原始文件名主干
 _GENERIC_OUTPUT_STEMS = {
     "converted", "merged", "compressed", "images", "output",
-    "protected", "unlocked", "removed", "result",
+    "protected", "unlocked", "removed", "result", "split-result",
 }
 
 
