@@ -58,6 +58,7 @@ def _protected_pdf_bytes(user_pwd: str) -> bytes:
 
 PDF_3 = _pdf_bytes(3)
 PDF_2 = _pdf_bytes(2)
+PDF_1 = _pdf_bytes(1)
 
 
 @pytest.fixture
@@ -172,7 +173,7 @@ def test_protect_happy_path(client):
 def test_extract_images_happy_path(client):
     r = client.post(
         "/api/v1/pdf/extract-images",
-        files={"file": ("input.pdf", _pdf_with_image_bytes(), "application/pdf")},
+        files={"file": ("我的文档.pdf", _pdf_with_image_bytes(), "application/pdf")},
     )
     assert r.status_code == 200
     body = r.json()
@@ -182,6 +183,37 @@ def test_extract_images_happy_path(client):
     dl = client.get(body["download_url"])
     assert dl.status_code == 200
     assert dl.content[:2] == b"PK"  # zip 文件头
+    # 下载文件名 = 原始上传文件主干 + .zip（而非固定中文名）
+    assert "filename*=utf-8''" in dl.headers["content-disposition"]
+    from urllib.parse import unquote
+
+    utf8_name = unquote(
+        dl.headers["content-disposition"].split("utf-8''", 1)[1].split(";")[0].strip('" ')
+    )
+    assert utf8_name == "我的文档.zip"
+
+
+def test_pdf_to_jpg_single_page_download_is_image_named_after_upload(client):
+    """单页 PDF 转 JPG：下载到的应是图片（非上传原件），且文件名 = 原始主干 + .jpg。"""
+    r = client.post(
+        "/api/v1/pdf/to-jpg",
+        files={"file": ("单页文档.pdf", PDF_1, "application/pdf")},
+        data={"format": "jpg", "pages": "all"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["file_count"] == 1
+
+    dl = client.get(body["download_url"])
+    assert dl.status_code == 200
+    # JPEG 魔数（修复前 fallback 会返回上传原件 input.pdf）
+    assert dl.content[:3] == b"\xff\xd8\xff"
+    disp = dl.headers["content-disposition"]
+    assert "filename*=utf-8''" in disp
+    from urllib.parse import unquote
+
+    utf8_name = unquote(disp.split("utf-8''", 1)[1].split(";")[0].strip('" '))
+    assert utf8_name == "单页文档.jpg"
 
 
 def test_extract_images_no_image_returns_422(client):

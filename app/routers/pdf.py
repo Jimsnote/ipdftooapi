@@ -580,7 +580,10 @@ async def pdf_to_jpg(
         )
 
         if len(image_paths) == 1:
-            final_path = image_paths[0]
+            # 统一命名为 converted.jpg/png：下载端点按 generic 名替换为「原始文件主干 + 扩展名」
+            ext = os.path.splitext(image_paths[0])[1] or ".jpg"
+            final_path = safe_join(task_dir, f"converted{ext}")
+            os.replace(image_paths[0], final_path)
             download_url = f"/api/v1/pdf/download/{task_id}"
         else:
             final_path = safe_join(task_dir, "images.zip")
@@ -836,10 +839,12 @@ async def download_file(task_id: str):
         ("merged_invoices.pdf", "发票合并打印.pdf"),
         ("output.md", "output.md"),
         (f"{task_id}.zip", "split-result.zip"),
+        ("converted.jpg", "converted.jpg"),
+        ("converted.png", "converted.png"),
         ("converted.docx", "converted.docx"),
         ("converted.md", "converted.md"),
         ("images.zip", "images.zip"),
-        ("extracted-images.zip", "PDF提取图片.zip"),
+        ("extracted-images.zip", "extracted-images.zip"),
     ]
     for c, download_name in candidates:
         path = safe_join(task_dir, c)
@@ -867,6 +872,7 @@ async def download_file(task_id: str):
 _GENERIC_OUTPUT_STEMS = {
     "converted", "merged", "compressed", "images", "output",
     "protected", "unlocked", "removed", "result", "split-result",
+    "extracted-images",
 }
 
 
