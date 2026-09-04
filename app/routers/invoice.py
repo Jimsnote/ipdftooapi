@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 
 from app.models.schemas import TaskResponse
 from app.services.invoice_merger import InvoiceMerger
+from app.services.invoice_merge_shared import OFD_INVOICE_LOCK, convert_ofd_batch
 from app.core.logger import get_logger
 from app.core.file_security import get_task_dir, make_task_dir, safe_join, save_upload_file
 
@@ -17,6 +18,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 MAX_INVOICE_FILES = 50
 MAX_INVOICE_SIZE = 10 * 1024 * 1024  # 10MB per file
 PDF_EXTENSIONS = (".pdf",)
+OFD_EXTENSIONS = (".ofd",)
 
 
 def raise_processing_error(error: Exception):
@@ -27,10 +29,15 @@ def raise_processing_error(error: Exception):
     raise HTTPException(status_code=500, detail=str(error))
 
 
-@router.post("/analyze", summary="Analyze uploaded invoice PDFs and return dimensions")
+@router.post("/analyze", summary="Analyze uploaded invoices (PDF/OFD mixed) and return dimensions")
 async def analyze_invoices(
     files: List[UploadFile] = File(...),
 ):
+    """混合上传：.ofd 后缀走锁内 OFD→PDF 转换+归一化，其余按 PDF 直存。
+
+    统一化方案 §5.1：分流逻辑从 ofd_invoice.py 挪进上传循环，
+    merge 阶段消费的本来就是 invoice_NNN.pdf，零改动。
+    """
     if len(files) > MAX_INVOICE_FILES:
         raise HTTPException(
             status_code=400,
@@ -41,19 +48,53 @@ async def analyze_invoices(
 
     saved_paths = []
     original_names = []
+    ofd_paths = []  # (index_in_saved, path) 待转换的 OFD
     for index, f in enumerate(files):
-        path = save_upload_file(
-            f,
-            safe_join(task_dir, f"invoice_{index + 1:03d}.pdf"),
-            MAX_INVOICE_SIZE,
-            PDF_EXTENSIONS,
-        )
-        saved_paths.append(path)
+        name = (f.filename or "").lower()
+        if name.endswith(OFD_EXTENSIONS):
+            path = save_upload_file(
+                f,
+                safe_join(task_dir, f"input_{index + 1:03d}.ofd"),
+                MAX_INVOICE_SIZE,
+                OFD_EXTENSIONS,
+            )
+            ofd_paths.append((index, path))
+            saved_paths.append(None)  # 占位，转换后回填
+        else:
+            path = save_upload_file(
+                f,
+                safe_join(task_dir, f"invoice_{index + 1:03d}.pdf"),
+                MAX_INVOICE_SIZE,
+                PDF_EXTENSIONS,
+            )
+            saved_paths.append(path)
         original_names.append(f.filename or f"invoice_{index + 1:03d}.pdf")
+
+    # OFD 批量转换（fail-fast；锁内防 2GB 服务器 OOM）。
+    # start_index 用第一个 OFD 的全局序号，产物直接命名为 invoice_NNN.pdf
+    #（NNN = 上传顺序号），与 PDF 直存命名空间连续对齐。
+    if ofd_paths:
+        try:
+            with OFD_INVOICE_LOCK:
+                convert_ofd_batch(
+                    task_dir,
+                    [p for _, p in ofd_paths],
+                    [original_names[i] for i, _ in ofd_paths],
+                    start_index=ofd_paths[0][0] + 1,
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Invoice analyze (OFD convert) task {task_id} failed: {e}")
+            raise_processing_error(e)
+        for idx, _ in ofd_paths:
+            saved_paths[idx] = safe_join(task_dir, f"invoice_{idx + 1:03d}.pdf")
+
+    pdf_paths = [p for p in saved_paths if p]
 
     try:
         merger = InvoiceMerger()
-        infos = merger.analyze(saved_paths)
+        infos = merger.analyze(pdf_paths)
 
         return {
             "task_id": task_id,
@@ -85,7 +126,7 @@ async def merge_invoices(
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
 
-    # Collect all PDF files in task dir
+    # Collect all PDF files in task dir（invoice_NNN.pdf，含 OFD 转换产物）
     pdf_paths = [
         safe_join(task_dir, f)
         for f in os.listdir(task_dir)

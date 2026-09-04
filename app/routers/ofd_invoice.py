@@ -1,24 +1,21 @@
-"""OFD 发票合并路由：上传 OFD → 逐个转 PDF → 归一化 → 复用 InvoiceMerger 排版。
+"""OFD 发票合并路由（旧端点，统一化过渡期保留 3 个月）。
 
-设计依据：docs/OFD_INVOICE_MERGE_DESIGN.md
-- 复用 InvoiceMerger（排版逻辑零改动），仅新增 OFD 校验 + 转换前处理。
-- 归一化后处理（§2.2 步骤 3.5 / 评审 P1）：easyofd 转出的 PDF MediaBox 被放大 25/9，
-  导致 300DPI 渲染内存峰值 ~95MB/页。归一化到 ~595pt 宽（矢量、保比例）后压回 ~12MB/页。
-- 转换失败 fail-fast 整批 400（评审 P4）：发票合并不允许部分成功。
-- 端点用 def + 全局锁（照抄 OCR 路由）：限并发=1，防止 2GB 服务器 OOM，且不阻塞 event loop。
+设计依据：docs/OFD_INVOICE_MERGE_DESIGN.md（首版）
+          docs/INVOICE_MERGE_UNIFICATION_PLAN.md（统一化，§5.1/§六）
+- 排版与 OFD 转换逻辑已提取到 services/invoice_merge_shared.py，
+  本模块仅保留路由壳，内部调用共享函数——对外 URL/行为不变。
+- 统一端点 /api/v1/invoice/analyze 已支持混合上传；本端点仅供旧前端与
+  外部直接调用方过渡，P3 观察期后（约 2026-12）视调用量下线。
 """
 import os
-import shutil
-import threading
 from typing import List
 
-import fitz
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 
 from app.models.schemas import TaskResponse
 from app.services.invoice_merger import InvoiceMerger
-from app.services.ofd_converter import OFDConverter
+from app.services.invoice_merge_shared import OFD_INVOICE_LOCK, convert_ofd_batch
 from app.core.logger import get_logger
 from app.core.file_security import get_task_dir, make_task_dir, safe_join, save_upload_file
 
@@ -31,81 +28,6 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 MAX_OFD_FILES = 50
 MAX_OFD_SIZE = 10 * 1024 * 1024  # 10MB / 单张，与 invoice-merge 对齐（评审 P2/P5）
 OFD_EXTENSIONS = (".ofd",)
-
-# 全局锁：限并发=1，防 2GB 服务器 OOM（转换+归一化+排版为 CPU/内存密集，照抄 OCR）
-_ofd_invoice_lock = threading.Lock()
-
-
-def _normalize_pdf(src: str, dst: str, threshold_pt: float = 800.0) -> str:
-    """把 easyofd 转出的超大 PDF 等比归一到正常物理尺寸（矢量保真）。
-
-    消除 MediaBox 放大 25/9 带来的渲染内存峰值（~95MB/页 → ~12MB/页），
-    并顺带修复绝对物理尺寸失真。宽高同比例缩放，A4 排版不会拉伸。
-    任何异常都 fallback 为复制原文件，绝不让整批任务因归一化失败而崩。
-    """
-    doc = fitz.open(src)
-    try:
-        if doc[0].rect.width <= threshold_pt:
-            # 尺寸已正常，直接复制
-            doc.close()
-            shutil.copyfile(src, dst)
-            return dst
-        k = 595.0 / doc[0].rect.width  # 目标宽 ~A4 宽，保持宽高比
-        out = fitz.open()
-        for p in doc:
-            np_ = out.new_page(width=p.rect.width * k, height=p.rect.height * k)
-            np_.show_pdf_page(np_.rect, doc, p.number)
-        doc.close()
-        out.save(dst)
-        out.close()
-        return dst
-    except Exception as e:
-        logger.warning(f"_normalize_pdf failed, fallback copy: {e}")
-        try:
-            doc.close()
-        except Exception:
-            pass
-        shutil.copyfile(src, dst)
-        return dst
-
-
-def _convert_and_normalize(task_dir: str, saved_ofd_paths: List[str], original_names: List[str]) -> List[str]:
-    """逐个 OFD → PDF → 归一化。
-
-    任一转换失败 → 整批失败（fail-fast，发票合并不允许部分成功，评审 P4）。
-    返回转换后的 .pdf 路径列表（invoice_NNN.pdf）。
-    """
-    converter = OFDConverter()
-    pdf_paths: List[str] = []
-    for idx, ofd_path in enumerate(saved_ofd_paths):
-        raw_pdf = safe_join(task_dir, f"invoice_{idx + 1:03d}_raw.pdf")
-        ok, msg = converter.ofd_to_pdf(ofd_path, raw_pdf)
-        if not ok:
-            name = original_names[idx] if idx < len(original_names) else f"第 {idx + 1} 个文件"
-            # 清理已生成的中间文件，避免脏数据残留
-            _cleanup_intermediate(task_dir)
-            raise HTTPException(
-                status_code=400,
-                detail=f"第 {idx + 1} 个文件「{name}」无法解析，请确认是税务系统开具的 OFD 版式发票。",
-            )
-        final_pdf = safe_join(task_dir, f"invoice_{idx + 1:03d}.pdf")
-        _normalize_pdf(raw_pdf, final_pdf)
-        try:
-            if os.path.exists(raw_pdf):
-                os.remove(raw_pdf)
-        except OSError:
-            pass
-        pdf_paths.append(final_pdf)
-    return pdf_paths
-
-
-def _cleanup_intermediate(task_dir: str) -> None:
-    for fn in os.listdir(task_dir):
-        if fn.endswith("_raw.pdf") or fn.startswith("invoice_") and fn.endswith(".pdf"):
-            try:
-                os.remove(safe_join(task_dir, fn))
-            except OSError:
-                pass
 
 
 @router.post("/analyze", summary="上传 OFD 发票并转换为 PDF，返回尺寸信息")
@@ -127,9 +49,9 @@ def analyze_ofd_invoices(files: List[UploadFile] = File(...)):
         saved_paths.append(path)
         original_names.append(f.filename or f"invoice_{index + 1:03d}.ofd")
 
-    with _ofd_invoice_lock:
+    with OFD_INVOICE_LOCK:
         try:
-            pdf_paths = _convert_and_normalize(task_dir, saved_paths, original_names)
+            pdf_paths = convert_ofd_batch(task_dir, saved_paths, original_names)
             merger = InvoiceMerger()
             infos = merger.analyze(pdf_paths)
 
@@ -174,7 +96,7 @@ def merge_ofd_invoices(
     if not pdf_paths:
         raise HTTPException(status_code=404, detail="未找到发票文件，请重新上传")
 
-    with _ofd_invoice_lock:
+    with OFD_INVOICE_LOCK:
         try:
             merger = InvoiceMerger()
             merger.analyze(pdf_paths)
