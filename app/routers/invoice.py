@@ -121,6 +121,8 @@ async def merge_invoices(
     margin: str = Form("standard"),
     crop_marks: bool = Form(True),
     page_numbers: bool = Form(True),
+    layout: str = Form("stacked"),
+    binding_mm: float = Form(0),
 ):
     task_dir = get_task_dir(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
@@ -147,6 +149,8 @@ async def merge_invoices(
             margin=margin if margin in ("narrow", "standard", "wide") else "standard",
             crop_marks=crop_marks,
             page_numbers=page_numbers,
+            layout=layout if layout in ("stacked", "paste_sheet") else "stacked",
+            binding_mm=max(0.0, min(binding_mm, 80.0)),
         )
 
         download_url = f"/api/v1/invoice/download/{task_id}"

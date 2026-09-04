@@ -40,11 +40,17 @@ def _find_ofd_sample():
 
 
 def _pdf_bytes(num_pages: int = 1) -> bytes:
-    buf = io.BytesIO()
-    writer = PdfWriter()
+    """生成带可见内容（红色矩形）的多页 PDF 字节流（A4 尺寸）。
+
+    空白 PDF 在 paste_sheet 测试中渲染不出非白像素，无法断言几何。
+    """
+    doc = fitz.open()
     for _ in range(num_pages):
-        writer.add_blank_page(width=595.27, height=841.89)
-    writer.write(buf)
+        page = doc.new_page(width=595.27, height=841.89)
+        page.draw_rect(fitz.Rect(50, 50, 545, 790), color=(0.8, 0.1, 0.1), fill=(0.95, 0.85, 0.85))
+    buf = io.BytesIO()
+    doc.save(buf)
+    doc.close()
     return buf.getvalue()
 
 
@@ -200,3 +206,110 @@ def test_ofd_endpoint_regression(client):
     body = r.json()
     assert body["total_count"] == 1
     assert body["invoices"][0]["filename"] == OFD_NAME
+
+
+# ---------- 阶段②：paste_sheet 凭证粘贴布局 ----------
+
+
+def _merge_paste(client, num_invoices: int, per_page: int, binding_mm: float = 30):
+    """辅助：上传 num_invoices 张 PDF → paste_sheet merge → 返回 (task_id, 输出 bytes)。"""
+    files = [("files", (f"inv{i}.pdf", _pdf_bytes(1), "application/pdf")) for i in range(num_invoices)]
+    r = client.post("/api/v1/invoice/analyze", files=files)
+    assert r.status_code == 200, r.text
+    task_id = r.json()["task_id"]
+
+    r2 = client.post(
+        "/api/v1/invoice/merge",
+        data={
+            "task_id": task_id,
+            "per_page": per_page,
+            "margin": "standard",
+            "crop_marks": "false",
+            "page_numbers": "false",
+            "layout": "paste_sheet",
+            "binding_mm": binding_mm,
+        },
+    )
+    return task_id, r2
+
+
+def _slot_content_bounds(doc, page):
+    """取页面内容区（排除左侧 gutter 死区后）非空白像素的范围。"""
+    import numpy as np
+
+    pix = page.get_pixmap(dpi=72)
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    nonwhite = (arr < 245).any(axis=2)
+    ys, xs = nonwhite.nonzero()
+    return (xs.min(), ys.min(), xs.max(), ys.max()) if len(xs) else None
+
+
+def test_paste_sheet_4up_landscape_with_left_gutter(client):
+    """4 张档：横版 A4 + 左 30mm 装订线死区 + 2×2 网格。"""
+    task_id, r2 = _merge_paste(client, 4, per_page=4)
+    assert r2.status_code == 200, r2.text
+
+    dl = client.get(f"/api/v1/invoice/download/{task_id}?preview=true")
+    doc = fitz.open(stream=dl.content, filetype="pdf")
+    assert doc.page_count == 1
+    page = doc[0]
+    # 横版 A4（297×210mm ≈ 842×595pt，允许渲染容差）
+    assert page.rect.width > page.rect.height, f"应为横版页: {page.rect}"
+    assert abs(page.rect.width - 842) < 10 and abs(page.rect.height - 595) < 10
+
+    # 左侧 30mm（约 85pt）装订线死区：内容不出现在 gutter 内
+    bounds = _slot_content_bounds(doc, page)
+    assert bounds is not None
+    x_min = bounds[0]
+    assert x_min >= 80, f"内容侵入左侧装订线（x_min={x_min}pt < 80pt）"
+    doc.close()
+
+
+def test_paste_sheet_2up_two_pages(client):
+    """2 张档（1×2 portrait 槽 + 发票旋转90°）：3 张发票 → 2 页。"""
+    task_id, r2 = _merge_paste(client, 3, per_page=2)
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["file_count"] == 1
+
+    dl = client.get(f"/api/v1/invoice/download/{task_id}?preview=true")
+    doc = fitz.open(stream=dl.content, filetype="pdf")
+    assert doc.page_count == 2
+    for p in doc:
+        assert p.rect.width > p.rect.height, "2 张档也应是横版页"
+        bounds = _slot_content_bounds(doc, p)
+        assert bounds is not None
+        assert bounds[0] >= 80, f"内容侵入左侧装订线（x_min={bounds[0]}pt）"
+    doc.close()
+
+
+def test_paste_sheet_invalid_per_page_rejected(client):
+    """粘贴模式 per_page 非 2/4 → 400 明确提示。"""
+    files = [("files", ("inv.pdf", _pdf_bytes(1), "application/pdf"))]
+    r = client.post("/api/v1/invoice/analyze", files=files)
+    task_id = r.json()["task_id"]
+
+    r2 = client.post(
+        "/api/v1/invoice/merge",
+        data={"task_id": task_id, "per_page": 6, "layout": "paste_sheet"},
+    )
+    assert r2.status_code == 400
+    assert "2 张或 4 张" in r2.json()["detail"]
+
+
+def test_paste_sheet_stacked_default_unchanged(client):
+    """不传 layout → stacked 竖版 A4（向后兼容回归）。"""
+    files = [("files", ("inv.pdf", _pdf_bytes(1), "application/pdf"))]
+    r = client.post("/api/v1/invoice/analyze", files=files)
+    task_id = r.json()["task_id"]
+
+    r2 = client.post(
+        "/api/v1/invoice/merge",
+        data={"task_id": task_id, "per_page": 4},
+    )
+    assert r2.status_code == 200, r2.text
+
+    dl = client.get(f"/api/v1/invoice/download/{task_id}?preview=true")
+    doc = fitz.open(stream=dl.content, filetype="pdf")
+    page = doc[0]
+    assert page.rect.height > page.rect.width, f"默认应为竖版页: {page.rect}"
+    doc.close()
