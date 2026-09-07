@@ -17,6 +17,7 @@ from app.services.image_to_pdf import ImageToPDFConverter
 from app.services.pdf_protector import PDFProtector
 from app.services.pdf_unlocker import PDFUnlocker
 from app.services.pdf_page_remover import PDFPageRemover
+from app.services.pdf_header_footer import PDFHeaderFooter
 from app.services.pdf_to_word import PDFToWordConverter
 from app.services.ofd_converter import OFDConverter
 from app.services.markdown_converter import OfficeToMarkdownConverter
@@ -399,6 +400,86 @@ async def compress_pdf(
         )
     except Exception as e:
         logger.error(f"Compress task {task_id} failed: {e}")
+        raise_processing_error(e)
+
+
+@router.post("/header-footer", response_model=TaskResponse, summary="Add header, footer and page numbers to a PDF")
+async def add_header_footer(
+    file: UploadFile = File(...),
+    header_text: str = Form(""),
+    header_position: str = Form("header-center"),
+    footer_text: str = Form(""),
+    footer_position: str = Form("footer-center"),
+    page_number_position: str = Form("header-right"),
+    page_number_format: str = Form("plain"),
+    page_number_start: int = Form(1),
+    margin: float = Form(36.0),
+    apply_from_page: int = Form(1),
+    header_font: str = Form("song"),
+    header_font_size: float = Form(9.0),
+    header_color: str = Form("#000000"),
+    footer_font: str = Form("song"),
+    footer_font_size: float = Form(9.0),
+    footer_color: str = Form("#000000"),
+    page_font: str = Form("song"),
+    page_font_size: float = Form(9.0),
+    page_color: str = Form("#000000"),
+):
+    if not any([header_text.strip(), footer_text.strip(), page_number_position != "none"]):
+        raise HTTPException(status_code=400, detail="请至少设置页眉、页脚或页码中的一项")
+
+    validate_pdf(file)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
+
+    input_path = save_pdf(file, task_dir)
+
+    try:
+        output_path = safe_join(task_dir, "header-footer.pdf")
+        hf = PDFHeaderFooter(input_path)
+        info = hf.apply(
+            output_path,
+            header_text=header_text.strip() or None,
+            header_position=header_position,
+            footer_text=footer_text.strip() or None,
+            footer_position=footer_position,
+            page_number_position=page_number_position,
+            page_number_format=page_number_format,
+            page_number_start=page_number_start,
+            margin=margin,
+            apply_from_page=apply_from_page,
+            header_font=header_font,
+            header_font_size=header_font_size,
+            header_color=header_color,
+            footer_font=footer_font,
+            footer_font_size=footer_font_size,
+            footer_color=footer_color,
+            page_font=page_font,
+            page_font_size=page_font_size,
+            page_color=page_color,
+        )
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+
+        parts = []
+        if info["headers_applied"]:
+            parts.append(f"页眉×{info['headers_applied']}页")
+        if info["footers_applied"]:
+            parts.append(f"页脚×{info['footers_applied']}页")
+        if info["numbers_applied"]:
+            parts.append(f"页码×{info['numbers_applied']}页")
+
+        logger.info(f"Header-footer task {task_id} completed: {', '.join(parts)}")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"已添加 {'、'.join(parts)}，共 {info['page_count']} 页",
+            download_url=download_url,
+            file_count=1,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Header-footer task {task_id} failed: {e}")
         raise_processing_error(e)
 
 
@@ -872,7 +953,7 @@ async def download_file(task_id: str):
 _GENERIC_OUTPUT_STEMS = {
     "converted", "merged", "compressed", "images", "output",
     "protected", "unlocked", "removed", "result", "split-result",
-    "extracted-images",
+    "extracted-images", "header-footer",
 }
 
 
