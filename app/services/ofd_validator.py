@@ -42,6 +42,18 @@ MIN_RATIO_FILE_SIZE = 4096
 # 转换超时（PoC 实测定稿：300 页服务器 15.8s × ~4 倍余量）
 CONVERSION_TIMEOUT_SECONDS = 60
 
+# ---- 归一化渲染像素法参数（P3-4 常量化，取值依据见 _visible_bbox/normalize_pdf）----
+# 渲染缩小倍率：1653pt 页 ≈ 330px，单页纯 Python 扫描 ~50ms
+BBOX_RENDER_ZOOM = 0.2
+# 非白判定阈值：容忍抗锯齿灰边
+BBOX_WHITE_TOL = 245
+# 可见内容宽或高低于页面该比例时判定为「缩角」，按包围盒裁剪重建
+CROP_COVERAGE_RATIO = 0.9
+# 裁剪重建时四周留白（pt），避免票面贴边
+CROP_PAD_PT = 6.0
+# 裁剪判定的包围盒最小宽度（pt）：过小的包围盒多为杂点，不值得裁剪
+CROP_MIN_BBOX_WIDTH = 20.0
+
 # 单 worker 前提下的进程级并发上限
 _CONCURRENCY = 2
 _semaphore = asyncio.Semaphore(_CONCURRENCY)
@@ -53,6 +65,14 @@ class OfdFileError(Exception):
 
 class OfdEncryptedError(OfdFileError):
     """OFD 文件已加密。"""
+
+
+# ---- 预扫描错误文案（P3-5 集中定义）----
+# /ofd/view 与 /ofd-to-pdf 共用同一校验（validate_ofd_zip），错误文案也必须
+# 同源——此前两端点各自定义且措辞漂移（"请先解密后重试" vs "请先解密"）。
+# 措辞对两个端点（在线查看 / 下载转换）均成立，不再分端点定制。
+OFD_MSG_NOT_OFD = "该文件不是有效的 OFD 文件（ZIP 结构校验失败）"
+OFD_MSG_ENCRYPTED = "该 OFD 文件已加密，请先解密后重试，或使用官方阅读器打开"
 
 
 def validate_ofd_zip(path: str) -> None:
@@ -126,7 +146,11 @@ def validate_ofd_zip(path: str) -> None:
         raise OfdFileError("不是有效的 ZIP 结构")
 
 
-def _visible_bbox(page: "fitz.Page", zoom: float = 0.2, tol: int = 245) -> "fitz.Rect":
+def _visible_bbox(
+    page: "fitz.Page",
+    zoom: float = BBOX_RENDER_ZOOM,
+    tol: int = BBOX_WHITE_TOL,
+) -> "fitz.Rect":
     """渲染像素法求页面「可见内容」包围盒（非白色像素的极值范围）。
 
     为什么不用矢量元素并集（get_drawings/get_text）：OFD 模板补丁会画整页
@@ -134,8 +158,8 @@ def _visible_bbox(page: "fitz.Page", zoom: float = 0.2, tol: int = 245) -> "fitz
     让「内容只占左上角 36%」的样本误判为已铺满（2026-09-08 实测翻车）。
     渲染成位图后只看非白像素，不可见填充天然免疫。
 
-    zoom=0.2 时 1653pt 页 ≈ 330px，单页纯 Python 扫描 ~50ms；整行全白时
-    按字节最小值快速跳过。tol=245 容忍抗锯齿灰边。
+    zoom=BBOX_RENDER_ZOOM 时 1653pt 页 ≈ 330px，单页纯 Python 扫描 ~50ms；
+    整行全白时按字节最小值快速跳过。BBOX_WHITE_TOL 容忍抗锯齿灰边。
     """
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
     w, h, n = pix.width, pix.height, pix.n
@@ -203,14 +227,14 @@ def normalize_pdf(
                 # 可见内容显著小于页面 → 裁剪到内容重建（修左上角缩角）
                 do_crop = (
                     not bbox.is_empty
-                    and bbox.width > 20
+                    and bbox.width > CROP_MIN_BBOX_WIDTH
                     and (
-                        bbox.width < p.rect.width * 0.9
-                        or bbox.height < p.rect.height * 0.9
+                        bbox.width < p.rect.width * CROP_COVERAGE_RATIO
+                        or bbox.height < p.rect.height * CROP_COVERAGE_RATIO
                     )
                 )
             if do_crop:
-                pad = 6.0
+                pad = CROP_PAD_PT
                 clip = fitz.Rect(
                     max(bbox.x0 - pad, 0),
                     max(bbox.y0 - pad, 0),
@@ -347,8 +371,6 @@ async def convert_ofd_to_pdf(
 
 def count_pdf_pages(path: str) -> int:
     """统计转换输出 PDF 的页数（供 /ofd/view 返回协议使用）。"""
-    import fitz
-
     doc = fitz.open(path)
     try:
         return doc.page_count

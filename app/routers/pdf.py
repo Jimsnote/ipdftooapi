@@ -20,6 +20,8 @@ from app.services.pdf_page_remover import PDFPageRemover
 from app.services.pdf_header_footer import PDFHeaderFooter
 from app.services.pdf_to_word import PDFToWordConverter
 from app.services.ofd_validator import (
+    OFD_MSG_ENCRYPTED,
+    OFD_MSG_NOT_OFD,
     OfdEncryptedError,
     OfdFileError,
     convert_ofd_to_pdf,
@@ -738,16 +740,10 @@ async def ofd_to_pdf(
         validate_ofd_zip(input_path)
     except OfdEncryptedError:
         logger.info(f"OFD-to-PDF task {task_id} rejected: encrypted file")
-        raise HTTPException(
-            status_code=422,
-            detail="该 OFD 文件已加密，请先解密后重试，或使用官方阅读器打开",
-        )
+        raise HTTPException(status_code=422, detail=OFD_MSG_ENCRYPTED)
     except OfdFileError as e:
         logger.info(f"OFD-to-PDF task {task_id} rejected: {e}")
-        raise HTTPException(
-            status_code=422,
-            detail="该文件不是有效的 OFD 文件（ZIP 结构校验失败）",
-        )
+        raise HTTPException(status_code=422, detail=OFD_MSG_NOT_OFD)
 
     try:
         output_path = safe_join(task_dir, "converted.pdf")

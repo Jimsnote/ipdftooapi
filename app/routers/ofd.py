@@ -21,6 +21,8 @@ from app.core.exceptions import FileTooLargeError
 from app.core.file_security import make_task_dir, safe_join, save_upload_file, validate_extension, validate_file_header
 from app.core.logger import get_logger
 from app.services.ofd_validator import (
+    OFD_MSG_ENCRYPTED,
+    OFD_MSG_NOT_OFD,
     OfdEncryptedError,
     OfdFileError,
     convert_ofd_to_pdf,
@@ -36,9 +38,9 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 OFD_EXTENSIONS = (".ofd",)
 
-# 错误三分类文案（docs/OFD_VIEWER_DESIGN.md §4.3 表）
-MSG_NOT_OFD = "该文件不是有效的 OFD 文件（ZIP 结构校验失败）"
-MSG_ENCRYPTED = "该 OFD 文件已加密，暂不支持在线查看，请先解密或使用官方阅读器"
+# 错误三分类文案（docs/OFD_VIEWER_DESIGN.md §4.3 表）；not-ofd/encrypted
+# 两类与 /ofd-to-pdf 共用常量（P3-5 集中在 ofd_validator，防止措辞漂移），
+# convert-failed 为本端点专属文案保留在此
 MSG_CONVERT_FAILED = (
     "OFD 转换失败：该文件可能包含不受支持的电子签章或版式特性，"
     "请确认其为标准 OFD 文件后重试。"
@@ -70,10 +72,10 @@ async def ofd_view(file: UploadFile = File(...)):
         validate_ofd_zip(input_path)
     except OfdEncryptedError:
         logger.info(f"OFD view task {task_id} rejected: encrypted file")
-        raise HTTPException(status_code=422, detail=MSG_ENCRYPTED)
+        raise HTTPException(status_code=422, detail=OFD_MSG_ENCRYPTED)
     except OfdFileError as e:
         logger.info(f"OFD view task {task_id} rejected: {e}")
-        raise HTTPException(status_code=422, detail=MSG_NOT_OFD)
+        raise HTTPException(status_code=422, detail=OFD_MSG_NOT_OFD)
 
     output_path = safe_join(task_dir, "converted.pdf")
     try:
