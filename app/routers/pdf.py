@@ -19,7 +19,12 @@ from app.services.pdf_unlocker import PDFUnlocker
 from app.services.pdf_page_remover import PDFPageRemover
 from app.services.pdf_header_footer import PDFHeaderFooter
 from app.services.pdf_to_word import PDFToWordConverter
-from app.services.ofd_converter import OFDConverter
+from app.services.ofd_validator import (
+    OfdEncryptedError,
+    OfdFileError,
+    convert_ofd_to_pdf,
+    validate_ofd_zip,
+)
 from app.services.markdown_converter import OfficeToMarkdownConverter
 from app.services.storage import StorageService
 from app.core.logger import get_logger
@@ -727,10 +732,30 @@ async def ofd_to_pdf(
 
     input_path = save_upload_by_type(file, task_dir, "input.ofd", OFD_EXTENSIONS)
 
+    # zip 预扫描（zip bomb 四规则 + 加密检测），与 /ofd/view 共用同一校验
+    # （docs/OFD_VIEWER_DESIGN.md §4.3：顺带加固本端点）
+    try:
+        validate_ofd_zip(input_path)
+    except OfdEncryptedError:
+        logger.info(f"OFD-to-PDF task {task_id} rejected: encrypted file")
+        raise HTTPException(
+            status_code=422,
+            detail="该 OFD 文件已加密，请先解密后重试，或使用官方阅读器打开",
+        )
+    except OfdFileError as e:
+        logger.info(f"OFD-to-PDF task {task_id} rejected: {e}")
+        raise HTTPException(
+            status_code=422,
+            detail="该文件不是有效的 OFD 文件（ZIP 结构校验失败）",
+        )
+
     try:
         output_path = safe_join(task_dir, "converted.pdf")
-        converter = OFDConverter()
-        success, result = converter.ofd_to_pdf(input_path, output_path)
+        # crop=False（P2-4）：下载链路只做整页等比缩放，不缩角裁剪——
+        # 下载文件的物理尺寸应忠实于原文档（页边距保留，打印表现一致）
+        success, result = await convert_ofd_to_pdf(
+            input_path, output_path, crop=False
+        )
 
         if not success:
             logger.error(f"OFD-to-PDF task {task_id} failed: {result}")

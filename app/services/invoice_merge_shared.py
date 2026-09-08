@@ -10,53 +10,24 @@
   归一到 ~595pt 宽（矢量保真），渲染内存峰值 ~95MB/页 → ~12MB/页。
 """
 import os
-import shutil
 import threading
 from typing import List
 
-import fitz
 from fastapi import HTTPException
 
 from app.services.ofd_converter import OFDConverter
+from app.services.ofd_validator import (  # noqa: F401  normalize_pdf 2026-09-08 上移至 ofd_validator，此处保留导出兼容
+    OfdEncryptedError,
+    OfdFileError,
+    normalize_pdf,
+    validate_ofd_zip,
+)
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
 # 进程级锁：限并发=1，防 2GB 服务器 OOM（转换+归一化+排版为 CPU/内存密集）
 OFD_INVOICE_LOCK = threading.Lock()
-
-
-def normalize_pdf(src: str, dst: str, threshold_pt: float = 800.0) -> str:
-    """把 easyofd 转出的超大 PDF 等比归一到正常物理尺寸（矢量保真）。
-
-    消除 MediaBox 放大 25/9 带来的渲染内存峰值，并顺带修复绝对物理尺寸失真。
-    宽高同比例缩放，A4 排版不会拉伸。
-    任何异常都 fallback 为复制原文件，绝不让整批任务因归一化失败而崩。
-    """
-    doc = fitz.open(src)
-    try:
-        if doc[0].rect.width <= threshold_pt:
-            # 尺寸已正常，直接复制
-            doc.close()
-            shutil.copyfile(src, dst)
-            return dst
-        k = 595.0 / doc[0].rect.width  # 目标宽 ~A4 宽，保持宽高比
-        out = fitz.open()
-        for p in doc:
-            np_ = out.new_page(width=p.rect.width * k, height=p.rect.height * k)
-            np_.show_pdf_page(np_.rect, doc, p.number)
-        doc.close()
-        out.save(dst)
-        out.close()
-        return dst
-    except Exception as e:
-        logger.warning(f"normalize_pdf failed, fallback copy: {e}")
-        try:
-            doc.close()
-        except Exception:
-            pass
-        shutil.copyfile(src, dst)
-        return dst
 
 
 def convert_ofd_batch(
@@ -80,9 +51,27 @@ def convert_ofd_batch(
     for i, ofd_path in enumerate(ofd_paths):
         idx = start_index + i
         raw_pdf = os.path.join(task_dir, f"invoice_{idx:03d}_raw.pdf")
+        # zip 预扫描（对抗审查加固）：与 /ofd/view 同一校验，拦截 zip bomb
+        # （含伪造中央目录变体）与加密文件——本函数是统一/旧两个发票合并端点
+        # 的 OFD 唯一转换入口，单点覆盖。
+        name = original_names[i] if i < len(original_names) else f"第 {idx} 个文件"
+        try:
+            validate_ofd_zip(ofd_path)
+        except OfdEncryptedError:
+            cleanup_intermediate(task_dir)
+            raise HTTPException(
+                status_code=400,
+                detail=f"第 {idx} 个文件「{name}」已加密，请先解密后重试。",
+            )
+        except OfdFileError as e:
+            cleanup_intermediate(task_dir)
+            logger.info(f"OFD 预扫描拦截（第 {idx} 个文件 {name}）: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"第 {idx} 个文件「{name}」不是有效的 OFD 文件，请确认是税务系统开具的 OFD 版式发票。",
+            )
         ok, msg = converter.ofd_to_pdf(ofd_path, raw_pdf)
         if not ok:
-            name = original_names[i] if i < len(original_names) else f"第 {idx} 个文件"
             logger.error(f"OFD 转换失败（第 {idx} 个文件 {name}）: {msg}")
             cleanup_intermediate(task_dir)
             raise HTTPException(

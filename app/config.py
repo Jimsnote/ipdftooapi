@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
     MAX_FILES_PER_REQUEST: int = 20
 
+    # OFD viewer（docs/OFD_VIEWER_DESIGN.md：20MB 上限，数科官方 5MB 的 4 倍）
+    OFD_VIEW_MAX_SIZE: int = 20 * 1024 * 1024
+
     # OCR
     OCR_MAX_SIZE: int = 20 * 1024 * 1024  # 20MB
     OCR_MAX_PAGES: int = 10
