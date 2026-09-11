@@ -7,6 +7,8 @@ pydantic-settings==2.1.0
 httpx<0.28               # TestClient 依赖：starlette 0.36 的 TestClient 需 httpx<0.28，否则报 app 参数错误
 pypdf==4.0.0
 pymupdf4llm>=0.0.17
+pikepdf>=8.0             # XFA 签证表增量回填（visa_fill：datasets 流读写 + 加密参数提取）
+cryptography>=42.0       # AESV2 流加密（visa_fill 增量段新 datasets 的加密，R4 三件套）
 # Tencent Cloud COS SDK
 qcloud-python-sts==3.1.5
 cos-python-sdk-v5==1.9.28
