@@ -248,6 +248,9 @@ class TestParsers:
             [{"page": 1, "x": 1, "y": 1, "w": 1, "h": -2}],  # 高必须 > 0
             [{"page": 1, "x": -5, "y": 1, "w": 1, "h": 1}],  # 坐标不能为负
             [{"page": 1, "x": 1, "y": 1, "w": 1}],  # 缺字段
+            [{"page": 1, "x": float("nan"), "y": 1, "w": 1, "h": 1}],  # NaN
+            [{"page": 1, "x": 1, "y": 1, "w": float("inf"), "h": 1}],  # Infinity
+            [{"page": 1, "x": float("-inf"), "y": 1, "w": 1, "h": 1}],  # -Infinity
         ],
     )
     def test_parse_rects_rejects(self, bad):
@@ -460,6 +463,134 @@ class TestRectsMode:
         )
         assert report["widgetWarningPages"] == [1]
         assert report["annotsRemoved"] == 0
+
+    def test_all_annot_types_with_contents_removed(self):
+        """对抗审查：Square/Text 等注释的 /Contents 藏原文 → 相交即删。
+
+        注释内容不进文本验证通道，漏删 = 永久泄露（2026-09-15 实测）。
+        """
+        doc = fitz.open()
+        page = doc.new_page(width=595.27, height=841.89)
+        page.insert_text(fitz.Point(72, 100), "REDACT-THIS-LINE", fontsize=12)
+        page.insert_text(fitz.Point(72, 160), "keep-me-line", fontsize=12)
+        a1 = page.add_rect_annot(fitz.Rect(60, 88, 280, 106))
+        doc.xref_set_key(a1.xref, "Contents", "(note: TOP-SECRET-CONTENT-HERE)")
+        a1.update()
+        a2 = page.add_text_annot(fitz.Point(250, 100), "sticky SECRET-NOTE-X", icon="Comment")
+        a2.update()
+        # 不相交的注释必须保留
+        a3 = page.add_text_annot(fitz.Point(300, 700), "unrelated note", icon="Comment")
+        a3.update()
+        data = doc.tobytes()
+        doc.close()
+        out, report = redact(
+            data, "rects", [{"page": 1, "x": 60, "y": 88, "w": 220, "h": 24}], {}
+        )
+        assert report["annotsRemoved"] == 2
+        doc = fitz.open(stream=out, filetype="pdf")
+        try:
+            survivors = list(doc[0].annots() or [])
+            joined = "\n".join(doc.xref_object(a.xref) for a in survivors)
+            assert "TOP-SECRET-CONTENT-HERE" not in joined
+            assert "SECRET-NOTE-X" not in joined
+            assert "unrelated note" in joined
+        finally:
+            doc.close()
+
+    def test_outline_bookmark_scrubbed(self):
+        """对抗审查：书签/目录标题残留被涂黑文字 → 必须清除，无关书签保留。"""
+        doc = fitz.open()
+        page = doc.new_page(width=595.27, height=841.89)
+        page.insert_text(fitz.Point(72, 100), "TOP-SECRET-OUTLINE-TEXT", fontsize=12)
+        page.insert_text(fitz.Point(72, 160), "normal-content-here", fontsize=12)
+        doc.set_toc(
+            [
+                [1, "Chapter: TOP-SECRET-OUTLINE-TEXT", 1],
+                [1, "Appendix: normal-content-here", 1],
+            ]
+        )
+        data = doc.tobytes()
+        doc.close()
+        out, _ = redact(
+            data, "rects", [{"page": 1, "x": 60, "y": 88, "w": 220, "h": 24}], {}
+        )
+        doc = fitz.open(stream=out, filetype="pdf")
+        try:
+            toc = doc.get_toc()
+            titles = [t[1] for t in toc]
+            assert not any("TOP-SECRET" in t for t in titles), f"书签泄露: {titles}"
+            assert any("Appendix" in t for t in titles), f"误删无关书签: {titles}"
+        finally:
+            doc.close()
+
+    def test_outline_nested_parent_scrub_keeps_valid_levels(self):
+        """对抗审查：删除层级书签的敏感父节点后，子节点层级须规一化不报错。"""
+        doc = fitz.open()
+        page = doc.new_page(width=595.27, height=841.89)
+        page.insert_text(fitz.Point(72, 100), "SECRET-CHAPTER-NAME", fontsize=12)
+        page.insert_text(fitz.Point(72, 160), "plain-body-text-here", fontsize=12)
+        doc.set_toc(
+            [
+                [1, "SECRET-CHAPTER-NAME", 1],
+                [2, "section alpha", 1],
+                [2, "section beta", 1],
+                [3, "subsection gamma", 1],
+            ]
+        )
+        data = doc.tobytes()
+        doc.close()
+        out, _ = redact(
+            data, "rects", [{"page": 1, "x": 60, "y": 88, "w": 220, "h": 24}], {}
+        )
+        doc = fitz.open(stream=out, filetype="pdf")
+        try:
+            toc = doc.get_toc()
+            assert [t[1] for t in toc] == [
+                "section alpha",
+                "section beta",
+                "subsection gamma",
+            ]
+            levels = [t[0] for t in toc]
+            assert levels == [1, 1, 2], f"层级未规一化: {levels}"
+        finally:
+            doc.close()
+
+    def test_rects_zero_hits_fails_closed(self):
+        """对抗审查：框选页码超出文件页数 → 必须报错，禁止静默返回未涂黑原文件。"""
+        doc = fitz.open()
+        page = doc.new_page(width=595.27, height=841.89)
+        page.insert_text(fitz.Point(72, 100), "sensitive-data-here", fontsize=12)
+        data = doc.tobytes()
+        doc.close()
+        with pytest.raises(PDFProcessingError):
+            redact(
+                data, "rects", [{"page": 9, "x": 60, "y": 88, "w": 200, "h": 24}], {}
+            )
+
+    def test_verify_tolerates_whitespace_variation(self, monkeypatch):
+        """对抗审查：双引擎空白/行序差异不得造成假残留 → 误触发光栅化降级。"""
+        data = _make_keywords_pdf()
+        out, report = redact(
+            data, "rects", [{"page": 1, "x": 60, "y": 88, "w": 200, "h": 24}], {}
+        )
+        assert report["rasterizedPages"] == []
+        # 模拟 pdfminer 对输出的提取与 fitz clip 存在空白差异
+        import app.services.redactor as R
+
+        real_extract = R._extract_pdfminer
+
+        def spaced(data_bytes, page_numbers=None):
+            text = real_extract(data_bytes, page_numbers=page_numbers)
+            return " ".join(text)  # 每个字符间插空格
+
+        monkeypatch.setattr(R, "_extract_pdfminer", spaced)
+        residue = R._verify(
+            out,
+            {"AAA-line-to-erase"},
+            set(),
+            len(fitz.open(stream=out, filetype="pdf")),
+        )
+        assert residue == set(), f"空白差异被误判为残留: {residue}"
 
     def test_empty_rects_raises_at_route_level(self):
         # 路由层校验；service 层空 rects 框选 = 零命中，仍正常返回

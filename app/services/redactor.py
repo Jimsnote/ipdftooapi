@@ -72,6 +72,9 @@ def parse_rects(raw: object) -> List[dict]:
             h = float(item["h"])
         except (KeyError, TypeError, ValueError):
             raise PDFProcessingError("rects 元素缺少 page/x/y/w/h 或数值非法")
+        # JSON 允许 NaN/Infinity 字面量——非有限值会产生不可预测的矩形运算
+        if not all(math.isfinite(v) for v in (x, y, w, h)):
+            raise PDFProcessingError("rects 坐标必须为有限数值")
         if page < 1:
             raise PDFProcessingError("rects 的 page 从 1 开始")
         if w <= 0 or h <= 0:
@@ -135,6 +138,15 @@ def _expand(rect: fitz.Rect) -> fitz.Rect:
         rect.x1 + HIT_EXPAND_PT,
         rect.y1 + HIT_EXPAND_PT,
     )
+
+
+def _norm_ws(s: str) -> str:
+    """剥除全部空白——验证匹配用。
+
+    fitz clip 与 pdfminer/pdfium 对同一区域的行序/空白常有差异，
+    剥空白后做子串匹配，防"格式差异误判残留 → 不必要的光栅化降级"。
+    """
+    return re.sub(r"\s+", "", s)
 
 
 def _collect_hits(
@@ -204,8 +216,11 @@ def _collect_hits(
 def _remove_overlapping_annots(
     doc: fitz.Document, hits: List[Hit]
 ) -> Tuple[int, List[int]]:
-    """删除与命中矩形相交的 FreeText/Stamp 注释（WPS 式文本框不删等于没脱敏）。
+    """删除与命中矩形相交的注释（不区分类型）。
 
+    任何注释类型的 /Contents 都可能藏有原文（Square/Text/Highlight/FreeText/
+    Stamp...），且注释内容不进文本验证通道——漏删等于永久泄露（2026-09-15
+    对抗审查实测）。宁滥勿缺：相交即删。
     Widget（AcroForm 表单字段）M0 只记录提示不删除（设计 §3.8）。
     返回 (删除注释数, 出现相交 widget 的页号列表[1 基])。
     """
@@ -216,14 +231,55 @@ def _remove_overlapping_annots(
         page = doc[page_index]
         hit_rects = [h.rect for h in hits if h.page == page_index]
         for annot in list(page.annots() or []):
-            if annot.type[0] in (fitz.PDF_ANNOT_FREE_TEXT, fitz.PDF_ANNOT_STAMP):
-                if any(rect.intersects(annot.rect) for rect in hit_rects):
-                    page.delete_annot(annot)
-                    annots_removed += 1
+            if any(rect.intersects(annot.rect) for rect in hit_rects):
+                page.delete_annot(annot)
+                annots_removed += 1
         for widget in list(page.widgets() or []):
             if any(rect.intersects(widget.rect) for rect in hit_rects):
                 widget_pages.add(page_index + 1)
     return annots_removed, sorted(widget_pages)
+
+
+def _scrub_outline(doc: fitz.Document, literal_targets: Set[str]) -> int:
+    """清除书签/目录中被涂黑文字的残留（2026-09-15 对抗审查发现）。
+
+    Word/书签导出常把标题写入 outline，涂黑正文后书签面板仍直接可读。
+    判定：书签标题与任一验证目标做"剥空白 + 大小写不敏感"的双向包含匹配，
+    命中即删该条目（保留无关书签）。返回删除的条目数。
+    """
+    toc = doc.get_toc()
+    if not toc or not literal_targets:
+        return 0
+    # 双向包含均要求归一化后 ≥3 字符：过短串（如框选了单字）会大面积误删无关书签
+    norm_targets = [
+        nt
+        for nt in (_norm_ws(t).lower() for t in literal_targets)
+        if len(nt) >= 3
+    ]
+    if not norm_targets:
+        return 0
+
+    def hit(title: str) -> bool:
+        nt = _norm_ws(title).lower()
+        if len(nt) < 3:
+            return False
+        return any(nt in gt or gt in nt for gt in norm_targets)
+
+    kept = [entry for entry in toc if not hit(entry[1])]
+    removed = len(toc) - len(kept)
+    if removed:
+        # 删除父节点后子树层级断档，set_toc 要求逐级递增——按"保留条目的
+        # 相对嵌套关系"紧凑化：新层级 = 保留祖先数 + 1
+        fixed: List[List[object]] = []
+        stack: List[Tuple[int, int]] = []  # (原层级, 新层级)
+        for level, title, page_no in kept:
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            new_level = stack[-1][1] + 1 if stack else 1
+            fixed.append([new_level, title, page_no])
+            stack.append((level, new_level))
+        doc.set_toc(fixed)
+    return removed
 
 
 def _rasterize_pages(
@@ -306,7 +362,13 @@ def _verify(
     text_b_pages = _extract_pdfium(data)
     text_b = "\n".join(text_b_pages)
 
-    residue_literals = [t for t in literal_targets if t in text_a or t in text_b]
+    # 剥空白后匹配：双引擎行序/空白差异会造成假残留 → 误触发光栅化降级
+    norm_a, norm_b = _norm_ws(text_a), _norm_ws(text_b)
+    residue_literals = [
+        t
+        for t in literal_targets
+        if (nt := _norm_ws(t)) and (nt in norm_a or nt in norm_b)
+    ]
     residue_presets = [
         p for p in preset_ids if re.search(PRESET_PATTERNS[p], text_a) or re.search(PRESET_PATTERNS[p], text_b)
     ]
@@ -316,10 +378,10 @@ def _verify(
     # 全文有残留 → 逐页定位（pdfminer 逐页 + pdfium 已有逐页）
     residue_pages: Set[int] = set()
     for i in range(total_pages):
-        page_a = _extract_pdfminer(data, page_numbers=[i])
-        page_b = text_b_pages[i] if i < len(text_b_pages) else ""
-        for t in residue_literals:
-            if t in page_a or t in page_b:
+        page_a = _norm_ws(_extract_pdfminer(data, page_numbers=[i]))
+        page_b = _norm_ws(text_b_pages[i] if i < len(text_b_pages) else "")
+        for nt in (_norm_ws(t) for t in residue_literals):
+            if nt and (nt in page_a or nt in page_b):
                 residue_pages.add(i)
         for p in residue_presets:
             if re.search(PRESET_PATTERNS[p], page_a) or re.search(PRESET_PATTERNS[p], page_b):
@@ -375,6 +437,11 @@ def redact(
             raise PDFProcessingError(
                 "未在文件中找到匹配的关键词（扫描件/图片页无法按关键词定位，请改用框选涂黑）"
             )
+        if mode == "rects" and rects and not hits:
+            # fail-closed：静默返回未涂黑原文件会让用户误以为已脱敏（安全风险）
+            raise PDFProcessingError(
+                "框选区域未命中任何页面（页码可能超出文件页数或坐标无效），请检查后重试"
+            )
 
         # 验证目标采集（手术前）：
         literal_targets: Set[str] = set()
@@ -413,6 +480,9 @@ def redact(
             applied_pages = sorted({h.page for h in hits})
             for page_index in applied_pages:
                 doc[page_index].apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
+
+        # 书签/目录残留清理（涂黑正文后 outline 标题仍可读 = 泄露渠道）
+        outline_removed = _scrub_outline(doc, literal_targets)
 
         hit_rects_by_page: Dict[int, List[fitz.Rect]] = {}
         for h in hits:
@@ -458,7 +528,7 @@ def redact(
         }
         logger.info(
             f"redact 完成: mode={mode} hits={len(hits)} rasterized={sorted(rasterize_pages)} "
-            f"annots_removed={annots_removed} verified=True"
+            f"annots_removed={annots_removed} outline_removed={outline_removed} verified=True"
         )
         return out_bytes, report
     finally:
