@@ -153,10 +153,21 @@ def _collect_hits(
             image_pages.add(page_index)
 
         if mode == "rects":
+            # pdf.js convertToPdfPoint 返回绝对用户空间坐标；PyMuPDF 全部 API
+            # 使用 cropbox 相对坐标（原点=page.rect 左下）。带 CropBox 原点偏移
+            # 的页面（WPS 等工具导出常见）必须减去偏移，否则涂黑位置系统性错位。
+            cb = page.cropbox
+            off_x = cb.x0 - page.rect.x0
+            off_y = cb.y0 - page.rect.y0
             for r in rects:
                 if int(r["page"]) != page_index + 1:
                     continue
-                rect = fitz.Rect(r["x"], r["y"], r["x"] + r["w"], r["y"] + r["h"])
+                rect = fitz.Rect(
+                    r["x"] - off_x,
+                    r["y"] - off_y,
+                    r["x"] + r["w"] - off_x,
+                    r["y"] + r["h"] - off_y,
+                )
                 if rect.is_empty or not rect.intersects(page.rect):
                     continue
                 hits.append(Hit(page=page_index, rect=_expand(rect), source="rect"))

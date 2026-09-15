@@ -344,6 +344,40 @@ class TestRectsMode:
         _assert_kept_in_both(out, "BBB-line-to-keep")
         assert report["removed"]["rects"] == 1
 
+    def test_rect_redaction_with_cropbox_offset(self):
+        """CropBox 原点偏移页：前端送绝对用户空间坐标，后端须校正后涂黑。
+
+        pdf.js convertToPdfPoint 返回绝对坐标；PyMuPDF 用 cropbox 相对坐标。
+        无校正时框（绝对 86~108）落在两行之间 → 什么都不删 → FAIL。
+        """
+        doc = fitz.open()
+        page = doc.new_page(width=595.27, height=841.89)
+        page.insert_text(fitz.Point(72, 100), "AAA-line-to-erase", fontsize=12)
+        page.insert_text(fitz.Point(72, 160), "BBB-line-to-keep", fontsize=12)
+        page.set_cropbox(fitz.Rect(50, 30, 595.27, 841.89))
+        data = doc.tobytes()
+        doc.close()
+        # 绝对坐标框住 AAA（基线 y=100，文字约 88~104）
+        out, report = redact(
+            data, "rects", [{"page": 1, "x": 60, "y": 84, "w": 220, "h": 26}], {}
+        )
+        _assert_gone_in_both(out, "AAA-line-to-erase")
+        _assert_kept_in_both(out, "BBB-line-to-keep")
+        assert report["removed"]["rects"] == 1
+        # 黑块相对坐标应罩住 AAA 的相对位置（文字绝对 88~104 → 相对 58~74）
+        doc = fitz.open(stream=out, filetype="pdf")
+        try:
+            blacks = [
+                d["rect"]
+                for d in doc[0].get_drawings()
+                if d.get("fill") and all(c < 0.1 for c in d["fill"]) and d["rect"].width > 30
+            ]
+            assert blacks, "未找到黑块"
+            r = blacks[0]
+            assert 40 <= r.y0 <= 90 and r.y1 <= 110, f"黑块位置异常: {r}"
+        finally:
+            doc.close()
+
     def test_scanned_page_pixel_black_and_text_page_kept(self):
         """扫描页框选 → 像素涂黑；同文件文本页原样保留（混合重建）。"""
         data = _make_scanned_pdf()
