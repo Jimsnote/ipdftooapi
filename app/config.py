@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # OFD viewer（docs/OFD_VIEWER_DESIGN.md：20MB 上限，数科官方 5MB 的 4 倍）
     OFD_VIEW_MAX_SIZE: int = 20 * 1024 * 1024
 
+    # PDF 涂黑/脱敏（docs/2026-09-14_231000-redact-pdf-true-redaction-design.md §3.7）
+    # 页数上限 100：nginx proxy_read_timeout 60s 约束，M1 实测耗时达标后再放宽
+    REDACT_MAX_SIZE: int = 20 * 1024 * 1024
+    REDACT_MAX_PAGES: int = 100
+
     # OCR
     OCR_MAX_SIZE: int = 20 * 1024 * 1024  # 20MB
     OCR_MAX_PAGES: int = 10

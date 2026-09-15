@@ -27,3 +27,15 @@ class DownloadResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+class RedactPageMatches(BaseModel):
+    page: int  # 1 基页码
+    count: int
+
+
+class RedactLocateResponse(BaseModel):
+    """关键词只读定位结果——只含计数与页码分布，绝不回显原文。"""
+
+    matches: List[RedactPageMatches]
+    total: int

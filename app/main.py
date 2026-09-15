@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.config import settings
-from app.routers import pdf, health, id_photo, invoice, invoice_extract, ocr, ofd, ofd_invoice, visa
+from app.routers import pdf, health, id_photo, invoice, invoice_extract, ocr, ofd, ofd_invoice, redact, visa
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -42,3 +42,4 @@ app.include_router(ocr.router, prefix="/api/v1/ocr", tags=["OCR"])
 app.include_router(ofd.router, prefix="/api/v1/ofd", tags=["OFD"])
 app.include_router(ofd_invoice.router, prefix="/api/v1/ofd-invoice", tags=["OFD Invoice"])
 app.include_router(visa.router, prefix="/api/v1/visa", tags=["Visa Form"])
+app.include_router(redact.router, prefix="/api/v1/redact", tags=["Redact"])
