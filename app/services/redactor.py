@@ -40,7 +40,7 @@ PRESET_PATTERNS: Dict[str, str] = {
 
 @dataclass
 class Hit:
-    """一个涂黑命中：page 为 0 基索引，rect 为 PDF 用户空间（fitz 同 y-up）。"""
+    """一个涂黑命中：page 为 0 基索引，rect 为 PyMuPDF 视觉坐标（左上原点 y 向下）。"""
 
     page: int
     rect: fitz.Rect
@@ -53,7 +53,11 @@ class Hit:
 
 
 def parse_rects(raw: object) -> List[dict]:
-    """解析并校验 rects 参数：[{page(1基), x, y, w, h}]，返回清洗后的列表。"""
+    """解析并校验 rects 参数：[{page(1基), x, y, w, h}]，返回清洗后的列表。
+
+    坐标约定：视觉坐标——左上原点、y 向下、cropbox 相对、单位 pt
+    （前端 = css 像素 / pdf.js viewport.scale），与 PyMuPDF 全 API 同系。
+    """
     if not isinstance(raw, list):
         raise PDFProcessingError("rects 参数必须是数组")
     cleaned: List[dict] = []
@@ -153,21 +157,15 @@ def _collect_hits(
             image_pages.add(page_index)
 
         if mode == "rects":
-            # pdf.js convertToPdfPoint 返回绝对用户空间坐标；PyMuPDF 全部 API
-            # 使用 cropbox 相对坐标（原点=page.rect 左下）。带 CropBox 原点偏移
-            # 的页面（WPS 等工具导出常见）必须减去偏移，否则涂黑位置系统性错位。
-            cb = page.cropbox
-            off_x = cb.x0 - page.rect.x0
-            off_y = cb.y0 - page.rect.y0
+            # 前端(pdf.js)发送视觉坐标：左上原点、y 向下、cropbox 相对、单位 pt
+            # （= css 像素 / viewport.scale）。这与 PyMuPDF 全部 API（get_text/
+            # search_for/add_redact_annot）同一坐标系，直接使用即可。
+            # 注意：不能用 convertToPdfPoint 的输出（PDF 原生 y-up，左下原点），
+            # 后端按 y-down 解释时会整页垂直镜像（2026-09-15 report.pdf 实测事故）。
             for r in rects:
                 if int(r["page"]) != page_index + 1:
                     continue
-                rect = fitz.Rect(
-                    r["x"] - off_x,
-                    r["y"] - off_y,
-                    r["x"] + r["w"] - off_x,
-                    r["y"] + r["h"] - off_y,
-                )
+                rect = fitz.Rect(r["x"], r["y"], r["x"] + r["w"], r["y"] + r["h"])
                 if rect.is_empty or not rect.intersects(page.rect):
                     continue
                 hits.append(Hit(page=page_index, rect=_expand(rect), source="rect"))
@@ -244,9 +242,10 @@ def _rasterize_pages(
             for rect in hit_rects_by_page.get(i, []):
                 px0 = max(0, int(rect.x0 * zoom) - 1)
                 px1 = min(pix.width, int(math.ceil(rect.x1 * zoom)) + 1)
-                # PDF y-up → 像素 top-down
-                py0 = max(0, int((prect.height - rect.y1) * zoom) - 1)
-                py1 = min(pix.height, int(math.ceil((prect.height - rect.y0) * zoom)) + 1)
+                # 命中矩形与 PyMuPDF 全 API 同一视觉坐标系（左上原点 y 向下），
+                # 像素坐标同向，直接缩放即可
+                py0 = max(0, int(rect.y0 * zoom) - 1)
+                py1 = min(pix.height, int(math.ceil(rect.y1 * zoom)) + 1)
                 if px1 > px0 and py1 > py0:
                     draw.rectangle([px0, py0, px1, py1], fill=(0, 0, 0))
             buf = io.BytesIO()

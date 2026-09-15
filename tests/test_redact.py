@@ -345,10 +345,13 @@ class TestRectsMode:
         assert report["removed"]["rects"] == 1
 
     def test_rect_redaction_with_cropbox_offset(self):
-        """CropBox 原点偏移页：前端送绝对用户空间坐标，后端须校正后涂黑。
+        """CropBox 原点偏移页：前端送 cropbox 相对视觉坐标，后端原样使用。
 
-        pdf.js convertToPdfPoint 返回绝对坐标；PyMuPDF 用 cropbox 相对坐标。
-        无校正时框（绝对 86~108）落在两行之间 → 什么都不删 → FAIL。
+        坐标约定（2026-09-15 定版）：前端 = css 像素 / pdf.js viewport.scale，
+        即左上原点、y 向下、cropbox 相对、单位 pt——与 PyMuPDF 全 API 同系。
+        历史：v1 曾按"绝对 y-up 坐标+偏移校正"实现（855a547），实为错误理论
+        （convertToPdfPoint 的 y-up 输出按 y-down 解释会整页垂直镜像），
+        已随前端改送视觉坐标一并修正。
         """
         doc = fitz.open()
         page = doc.new_page(width=595.27, height=841.89)
@@ -357,14 +360,15 @@ class TestRectsMode:
         page.set_cropbox(fitz.Rect(50, 30, 595.27, 841.89))
         data = doc.tobytes()
         doc.close()
-        # 绝对坐标框住 AAA（基线 y=100，文字约 88~104）
+        # set_cropbox 后 AAA 相对 bbox = y 57.1~73.6（上移 30）；前端按视觉
+        # 位置框选（css/scale），即相对坐标 55~76
         out, report = redact(
-            data, "rects", [{"page": 1, "x": 60, "y": 84, "w": 220, "h": 26}], {}
+            data, "rects", [{"page": 1, "x": 20, "y": 55, "w": 220, "h": 21}], {}
         )
         _assert_gone_in_both(out, "AAA-line-to-erase")
         _assert_kept_in_both(out, "BBB-line-to-keep")
         assert report["removed"]["rects"] == 1
-        # 黑块相对坐标应罩住 AAA 的相对位置（文字绝对 88~104 → 相对 58~74）
+        # 黑块相对坐标应罩住 AAA（55~76 外扩 1pt → 54~77）
         doc = fitz.open(stream=out, filetype="pdf")
         try:
             blacks = [
@@ -374,9 +378,44 @@ class TestRectsMode:
             ]
             assert blacks, "未找到黑块"
             r = blacks[0]
-            assert 40 <= r.y0 <= 90 and r.y1 <= 110, f"黑块位置异常: {r}"
+            assert 50 <= r.y0 <= 60 and 70 <= r.y1 <= 82, f"黑块位置异常: {r}"
         finally:
             doc.close()
+
+    def test_rect_redaction_rotated_page(self):
+        """/Rotate 90 页：前端 viewport 自带旋转处理，css/scale 即视觉坐标；
+        PyMuPDF search_for/add_redact_annot 同为视觉坐标，必须精确命中。"""
+        doc = fitz.open()
+        page = doc.new_page(width=841.89, height=595.27)
+        page.insert_text(fitz.Point(72, 100), "ROT-AAA-to-erase", fontsize=12)
+        page.insert_text(fitz.Point(72, 160), "ROT-BBB-to-keep", fontsize=12)
+        page.set_rotation(90)
+        data = doc.tobytes()
+        # search_for 视觉坐标（实测 ROT-AAA = 72, 87.1, 173.4, 103.6），
+        # 模拟前端按视觉位置框选
+        probe = fitz.open(stream=data, filetype="pdf")
+        try:
+            vr = probe[0].search_for("ROT-AAA-to-erase")[0]
+        finally:
+            probe.close()
+        out, report = redact(
+            data,
+            "rects",
+            [
+                {
+                    "page": 1,
+                    "x": vr.x0 - 2,
+                    "y": vr.y0 - 2,
+                    "w": vr.width + 4,
+                    "h": vr.height + 4,
+                }
+            ],
+            {},
+        )
+        # pdfminer 对旋转页逐字符提取插 \n → 用剥空白断言
+        _assert_gone_ignoring_ws(out, "ROT-AAA-to-erase")
+        _assert_kept_ignoring_ws(out, "ROT-BBB-to-keep")
+        assert report["removed"]["rects"] == 1
 
     def test_scanned_page_pixel_black_and_text_page_kept(self):
         """扫描页框选 → 像素涂黑；同文件文本页原样保留（混合重建）。"""
@@ -395,9 +434,9 @@ class TestRectsMode:
             assert page.get_text().strip() == ""  # 图片页无文本层
             zoom = 2.0
             pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-            # 框中心 (180, 130) → 像素坐标
+            # 框中心 (180, 130)——视觉坐标（左上原点）→ 像素坐标同向直接缩放
             px = int(180 * zoom)
-            py = int((page.rect.height - 130) * zoom)
+            py = int(130 * zoom)
             r, g, b = pix.pixel(px, py)[:3]
             assert (r, g, b) == (0, 0, 0), f"框选中心不是黑色: {(r, g, b)}"
         finally:
