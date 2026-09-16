@@ -17,6 +17,8 @@ from app.services.image_to_pdf import ImageToPDFConverter
 from app.services.pdf_protector import PDFProtector
 from app.services.pdf_unlocker import PDFUnlocker
 from app.services.pdf_page_remover import PDFPageRemover
+from app.services.pdf_rotator import PDFRotator
+from app.services.pdf_watermarker import PDFWatermarker
 from app.services.pdf_header_footer import PDFHeaderFooter
 from app.services.pdf_to_word import PDFToWordConverter
 from app.services.ofd_validator import (
@@ -368,6 +370,149 @@ async def remove_pages(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Remove-pages task {task_id} failed: {e}")
+        raise_processing_error(e)
+
+
+@router.post("/rotate", response_model=TaskResponse, summary="Rotate pages of a PDF")
+async def rotate_pdf(
+    task_id: str = Form(...),
+    angle: int = Form(...),
+    pages: str = Form(""),
+):
+    task_dir = get_task_dir(TEMP_DIR, task_id)
+    if not os.path.exists(task_dir):
+        raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
+
+    input_path = safe_join(task_dir, "input.pdf")
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail="未找到 PDF 文件，请重新上传")
+
+    if angle not in (90, 180, 270):
+        raise HTTPException(status_code=400, detail="旋转角度只支持 90、180、270")
+
+    try:
+        rotator = PDFRotator(input_path)
+        total_pages = rotator.total_pages
+
+        pages_set = None
+        if pages.strip():
+            pages_set = PDFRotator.parse_page_list(pages, total_pages)
+            if not pages_set:
+                raise HTTPException(status_code=400, detail="未指定有效的旋转页码")
+
+        output_path = safe_join(task_dir, "rotated.pdf")
+        total, rotated = rotator.rotate(angle, output_path, pages=pages_set)
+
+        if os.path.exists(input_path):
+            os.remove(input_path)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+        scope = f"指定 {rotated} 页" if pages_set else "全部页面"
+        logger.info(f"Rotate task {task_id} completed: {scope} by {angle} degrees")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"已将{scope}顺时针旋转 {angle} 度（共 {total} 页）",
+            download_url=download_url,
+            file_count=1,
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Rotate task {task_id} failed: {e}")
+        raise_processing_error(e)
+
+
+@router.post("/watermark", response_model=TaskResponse, summary="Add a text or image watermark to a PDF")
+async def watermark_pdf(
+    task_id: str = Form(...),
+    wm_type: str = Form("text"),
+    text: str = Form(""),
+    layout: str = Form("tile"),
+    opacity: float = Form(0.2),
+    color: str = Form("gray"),
+    fontsize: float = Form(48.0),
+    width_fraction: float = Form(0.3),
+    pages: str = Form(""),
+    wm_image: UploadFile = File(None),
+):
+    task_dir = get_task_dir(TEMP_DIR, task_id)
+    if not os.path.exists(task_dir):
+        raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
+
+    input_path = safe_join(task_dir, "input.pdf")
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail="未找到 PDF 文件，请重新上传")
+
+    if wm_type not in ("text", "image"):
+        raise HTTPException(status_code=400, detail="水印类型只支持 text / image")
+
+    try:
+        watermarker = PDFWatermarker(input_path)
+        total_pages = watermarker.total_pages
+
+        pages_set = None
+        if pages.strip():
+            pages_set = PDFWatermarker.parse_page_list(pages, total_pages)
+            if not pages_set:
+                raise HTTPException(status_code=400, detail="未指定有效的水印页码")
+
+        output_path = safe_join(task_dir, "watermarked.pdf")
+
+        if wm_type == "text":
+            total, applied = watermarker.watermark_text(
+                text,
+                output_path,
+                opacity=opacity,
+                layout=layout,
+                color=color,
+                fontsize=fontsize,
+                pages=pages_set,
+            )
+        else:
+            if wm_image is None or not wm_image.filename:
+                raise HTTPException(status_code=400, detail="请上传水印图片")
+            ext = validate_extension(wm_image.filename, (".png", ".jpg", ".jpeg"))
+            image_bytes = await wm_image.read()
+            if len(image_bytes) > 10 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="水印图片不能超过 10MB")
+            # 魔数校验（与 file_security.validate_file_header 同语义，作用于已读 bytes）
+            magic = image_bytes[:16]
+            if ext == ".png" and not magic.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise HTTPException(status_code=400, detail="水印图片文件内容与扩展名不符")
+            if ext in (".jpg", ".jpeg") and not magic.startswith(b"\xff\xd8"):
+                raise HTTPException(status_code=400, detail="水印图片文件内容与扩展名不符")
+            total, applied = watermarker.watermark_image(
+                image_bytes,
+                output_path,
+                opacity=opacity,
+                layout=layout,
+                width_fraction=width_fraction,
+                pages=pages_set,
+            )
+
+        if os.path.exists(input_path):
+            os.remove(input_path)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+        scope = f"指定 {applied} 页" if pages_set else "全部页面"
+        kind = "文字" if wm_type == "text" else "图片"
+        logger.info(f"Watermark task {task_id} completed: {kind} watermark on {scope}")
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"已给{scope}添加{kind}水印（共 {total} 页）",
+            download_url=download_url,
+            file_count=1,
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Watermark task {task_id} failed: {e}")
         raise_processing_error(e)
 
 
