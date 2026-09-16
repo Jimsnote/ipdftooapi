@@ -647,6 +647,96 @@ class TestEdgeCases:
         _assert_gone_ignoring_ws(out, "敏感词汇")
         _assert_kept_ignoring_ws(out, "旋转页普通正文文本")
 
+    def test_rotated_page_widget_deleted(self):
+        """2026-09-16 三轮对抗审查：/Rotate 页上 annot/widget 的 rect 是未旋转
+        空间坐标（实测 widget y=700 > 旋转后页高 595），必须乘 rotation_matrix
+        变到视觉空间再判相交——否则旋转页 widget 永远漏删。"""
+        doc = fitz.open()
+        page = doc.new_page(width=595.27, height=841.89)
+        page.insert_text(fitz.Point(72, 100), "rotation widget probe", fontsize=12)
+        w = fitz.Widget()
+        w.field_name = "rot_field"
+        w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+        w.rect = fitz.Rect(100, 700, 260, 730)  # 未旋转空间：页面底部（视觉）
+        w.field_value = "rotvalue"
+        page.add_widget(w)
+        page.set_rotation(90)
+        # 旋转 90° 后视觉矩形 ≈ (111.89, 100, 141.89, 260)
+        data = doc.tobytes()
+        doc.close()
+
+        out, report = redact(
+            data, "rects", [{"page": 1, "x": 100, "y": 90, "w": 60, "h": 180}], {}
+        )
+        assert report["widgetsRemoved"] == [1]
+        assert b"rotvalue" not in out
+
+    def test_metadata_and_xmp_scrubbed(self):
+        """2026-09-16 三轮对抗审查：metadata/XMP 在涂黑后原样保留 = 属性面板
+        直接可读的泄露渠道。阈值放宽到 2 字符（中文人名普遍 2 字）。"""
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text(fitz.Point(72, 100), "张三的合同正文 body text", fontname="china-s", fontsize=12)
+        doc.set_metadata(
+            {"title": "张三的秘密", "author": "张三", "subject": "无关保留", "keywords": "普通标签"}
+        )
+        doc.set_xml_metadata(
+            "<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d'?><x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+            "<rdf:RDF><rdf:Description><dc:title><rdf:Alt><rdf:li>张三的秘密</rdf:li>"
+            "</rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end='w'?>"
+        )
+        data = doc.tobytes()
+        doc.close()
+
+        out, report = redact(data, "keywords", [], {"presets": [], "custom": ["张三"]})
+        # 原始字节级：敏感串不得残留于任何位置
+        assert "张三的秘密".encode("utf-8") not in out
+        # 命中字段清空，无关字段保留
+        od = fitz.open(stream=out, filetype="pdf")
+        assert od.metadata["title"] == ""
+        assert od.metadata["author"] == ""
+        assert od.metadata["subject"] == "无关保留"
+        assert od.metadata["keywords"] == "普通标签"
+        assert "张三" not in od.get_xml_metadata()
+        od.close()
+
+    def test_metadata_preset_scrub(self):
+        """预设模式下 metadata 里的手机号/身份证也要清（文件名带手机号场景）。"""
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text(fitz.Point(72, 100), f"body text {PHONE_SAMPLE} here", fontsize=12)
+        doc.set_metadata({"title": f"合同扫描件_{PHONE_SAMPLE}"})
+        data = doc.tobytes()
+        doc.close()
+
+        out, _ = redact(data, "keywords", [], {"presets": ["phone"], "custom": []})
+        od = fitz.open(stream=out, filetype="pdf")
+        assert PHONE_SAMPLE not in (od.metadata["title"] or "")
+        od.close()
+
+    def test_rasterize_preserves_embedded_files(self):
+        """2026-09-16 三轮对抗审查：_rasterize_pages 重建文档会静默丢光内嵌
+        附件——必须备份带回，报告计数以原件为准。"""
+        doc = fitz.open()
+        p1 = doc.new_page(width=595.27, height=841.89)  # 无文本 → 扫描页路径
+        p1.insert_image(fitz.Rect(72, 72, 300, 200), pixmap=fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4, 4)))
+        p2 = doc.new_page(width=595.27, height=841.89)
+        p2.insert_text(fitz.Point(72, 100), "kept body text", fontsize=12)
+        doc.embfile_add("att.txt", b"attachment-bytes-here")
+        data = doc.tobytes()
+        doc.close()
+
+        out, report = redact(
+            data, "rects", [{"page": 1, "x": 60, "y": 60, "w": 200, "h": 100}], {}
+        )
+        assert report["rasterizedPages"] == [1]
+        assert report["embeddedFiles"] == 1
+        # 附件流会被 deflate 压缩，raw bytes 断言不成立——结构断言为准
+        od = fitz.open(stream=out, filetype="pdf")
+        assert od.embfile_count() == 1
+        assert od.embfile_get("att.txt") == b"attachment-bytes-here"
+        od.close()
+
     def test_encrypted_rejected(self):
         data = _make_encrypted_pdf()
         with pytest.raises(PDFProcessingError, match="加密"):

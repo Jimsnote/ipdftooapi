@@ -224,6 +224,11 @@ def _remove_overlapping_annots(
     Widget（AcroForm 表单字段）同理：字段值存 AcroForm /V 不在页面内容流，
     涂黑覆盖不到、文本验证也扫不到（2026-09-15 二期）——相交字段清值后
     整体删除，其余字段保留可继续填写。
+    坐标系（2026-09-16 三轮对抗审查实测）：/Rotate 页上 annot/widget 的
+    rect 存的是未旋转空间坐标（实测 /Rotate 90 页 widget.rect y=700 落在
+    旋转后页高 595 之外），而命中矩形是视觉坐标——必须先乘
+    page.rotation_matrix 变换到视觉空间再做相交判定，否则旋转页上会
+    漏删（泄露）或误删。
     返回 (删除注释数, 被删除 widget 数, 出现 widget 删除的页号列表[1 基])。
     """
     annots_removed = 0
@@ -232,13 +237,20 @@ def _remove_overlapping_annots(
     pages = sorted({h.page for h in hits})
     for page_index in pages:
         page = doc[page_index]
+        mtx = page.rotation_matrix if page.rotation else None
+
+        def visual(rect: fitz.Rect) -> fitz.Rect:
+            return rect * mtx if mtx else rect
+
         hit_rects = [h.rect for h in hits if h.page == page_index]
         for annot in list(page.annots() or []):
-            if any(rect.intersects(annot.rect) for rect in hit_rects):
+            a_rect = visual(annot.rect)
+            if any(rect.intersects(a_rect) for rect in hit_rects):
                 page.delete_annot(annot)
                 annots_removed += 1
         for widget in list(page.widgets() or []):
-            if any(rect.intersects(widget.rect) for rect in hit_rects):
+            w_rect = visual(widget.rect)
+            if any(rect.intersects(w_rect) for rect in hit_rects):
                 # 先清值（/V 可能残留于 AcroForm 层）再删字段；个别字段类型
                 # （如签名/列表框）清值可能抛异常，不应阻断删除本身
                 try:
@@ -292,6 +304,53 @@ def _scrub_outline(doc: fitz.Document, literal_targets: Set[str]) -> int:
             stack.append((level, new_level))
         doc.set_toc(fixed)
     return removed
+
+
+def _scrub_metadata(
+    doc: fitz.Document, literal_targets: Set[str], preset_ids: Set[str]
+) -> int:
+    """清除文档元数据（Info 字典 + XMP）中被涂黑文字的残留。
+
+    2026-09-16 三轮对抗审查实测：metadata title/author/subject/keywords 与
+    XMP 在 apply_redactions 后原样保留——文件属性面板直接可读 = 泄露渠道。
+    判定与书签同款但阈值放宽到 ≥2 字符：元数据字段屈指可数、误清代价只是
+    观感（书签误删会破坏导航，metadata 不会），而中文人名/常见词普遍 2 字
+    （"张三"在书签阈值下漏网是实测事故）。预设模式额外用正则扫（文件名里
+    可能带手机号/身份证）。命中即清该字段；XMP 整包清除（目标化编辑 XMP
+    收益低、风险高）。返回清理的存储个数。
+    """
+    norm_targets = [
+        nt
+        for nt in (_norm_ws(t).lower() for t in literal_targets)
+        if len(nt) >= 2
+    ]
+
+    def hit(value: str) -> bool:
+        nv = _norm_ws(value).lower()
+        if any(nt in nv or nv in nt for nt in norm_targets):
+            return True
+        if preset_ids:
+            if any(re.search(PRESET_PATTERNS[p], value) for p in preset_ids):
+                return True
+        return False
+
+    changed = 0
+    meta = doc.metadata or {}
+    blank: Dict[str, str] = {}
+    for key, value in meta.items():
+        if isinstance(value, str) and value and hit(value):
+            blank[key] = ""
+    if blank:
+        doc.set_metadata(blank)
+        changed += len(blank)
+
+    try:
+        if doc.get_xml_metadata() and hit(doc.get_xml_metadata()):
+            doc.del_xml_metadata()
+            changed += 1
+    except Exception:
+        pass
+    return changed
 
 
 def _rasterize_pages(
@@ -443,6 +502,39 @@ def redact(
     doc = _open_doc(pdf_data)
     try:
         _check_pages(doc, 100)
+        # 附件备份（2026-09-16 三轮对抗审查实测：_rasterize_pages 重建文档会
+        # 静默丢光全部内嵌附件——用户数据丢失 + 报告计数失真）。涂黑不动
+        # 附件层（用户拍板只告知），故无论走到哪条光栅化路径都要原样带回。
+        emb_backup = []
+        try:
+            for name in doc.embfile_names():
+                # 逐文件 try：单个附件 info 异常不能拖垮其余附件的备份
+                try:
+                    info = doc.embfile_info(name)
+                    # 本版 PyMuPDF embfile_add 签名 = filename/ufilename/desc；
+                    # info 返回键同名但 description→desc 需换名，直接透传
+                    # "description" 会 TypeError 被 except 静默吞掉
+                    add_kwargs = {}
+                    if info.get("filename"):
+                        add_kwargs["filename"] = info["filename"]
+                    if info.get("ufilename"):
+                        add_kwargs["ufilename"] = info["ufilename"]
+                    if info.get("description"):
+                        add_kwargs["desc"] = info["description"]
+                    emb_backup.append((name, doc.embfile_get(name), add_kwargs))
+                except Exception:
+                    continue
+        except Exception:
+            emb_backup = []
+
+        def _restore_embfiles(target: fitz.Document) -> None:
+            if emb_backup and target.embfile_count() < len(emb_backup):
+                for name, buf, info in emb_backup:
+                    try:
+                        target.embfile_add(name, buf, **info)
+                    except Exception:
+                        pass
+
         hits, image_pages = _collect_hits(doc, mode, rects, keywords)
 
         if mode == "keywords" and not hits:
@@ -497,6 +589,8 @@ def redact(
 
         # 书签/目录残留清理（涂黑正文后 outline 标题仍可读 = 泄露渠道）
         outline_removed = _scrub_outline(doc, literal_targets)
+        # 元数据残留清理（文件属性面板/XMP 直接可读 = 泄露渠道，2026-09-16）
+        metadata_removed = _scrub_metadata(doc, literal_targets, preset_ids)
 
         hit_rects_by_page: Dict[int, List[fitz.Rect]] = {}
         for h in hits:
@@ -508,6 +602,7 @@ def redact(
         }
         if rasterize_pages:
             doc = _rasterize_pages(doc, rasterize_pages, hit_rects_by_page)
+            _restore_embfiles(doc)
 
         out_bytes = doc.tobytes(deflate=True, garbage=3)
         total_pages = len(doc)
@@ -520,6 +615,7 @@ def redact(
             )
             fallback_pages = {i for i in residue}
             doc = _rasterize_pages(doc, fallback_pages, hit_rects_by_page)
+            _restore_embfiles(doc)
             out_bytes = doc.tobytes(deflate=True, garbage=3)
             residue2 = _verify(out_bytes, literal_targets, preset_ids, len(doc))
             if residue2:
@@ -538,12 +634,14 @@ def redact(
             "imagePages": sorted(p + 1 for p in image_pages),
             "annotsRemoved": annots_removed,
             "widgetsRemoved": widget_pages,
-            "embeddedFiles": doc.embfile_count(),
+            "embeddedFiles": len(emb_backup),
             "verified": True,
         }
         logger.info(
             f"redact 完成: mode={mode} hits={len(hits)} rasterized={sorted(rasterize_pages)} "
-            f"annots_removed={annots_removed} outline_removed={outline_removed} verified=True"
+            f"annots_removed={annots_removed} widgets_removed={widgets_removed} "
+            f"outline_removed={outline_removed} metadata_removed={metadata_removed} "
+            f"embedded_files={len(emb_backup)} verified=True"
         )
         return out_bytes, report
     finally:
