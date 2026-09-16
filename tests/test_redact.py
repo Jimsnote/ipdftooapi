@@ -3,7 +3,7 @@
 覆盖范围（对应 docs/2026-09-14_231000-redact-pdf-true-redaction-design.md §10）：
 - CJK 命中/非命中同页黄金断言（防误删 + 双引擎互验）
 - 身份证/手机/邮箱正则预设命中与干扰项不误删
-- FreeText/Stamp 注释清理、Widget 相交警告
+- FreeText/Stamp 注释清理、Widget 相交清值删除、内嵌附件检测提示
 - 扫描页（图片无文本层）像素涂黑 + 混合重建
 - 旋转页、加密拒绝、页数上限、大小上限（路由层）
 - 双引擎（pdfminer.six + pypdfium2）互验
@@ -216,6 +216,13 @@ def _make_widget_pdf() -> bytes:
     w.rect = fitz.Rect(100, 200, 260, 230)
     w.field_value = " sensitivedata "
     page.add_widget(w)
+    # 不相交字段：必须保留且值不丢（只有相交字段才删）
+    keep = fitz.Widget()
+    keep.field_name = "keep_field"
+    keep.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+    keep.rect = fitz.Rect(320, 400, 460, 430)
+    keep.field_value = "keepme_value"
+    page.add_widget(keep)
     data = doc.tobytes()
     doc.close()
     return data
@@ -455,14 +462,42 @@ class TestRectsMode:
         _assert_gone_in_both(out, "SECRET-ANNOT-TEXT")
         _assert_kept_in_both(out, "普通正文内容在这里")
 
-    def test_widget_intersection_reported_not_deleted(self):
-        """相交 Widget M0 只警告不删除（设计 §3.8）。"""
+    def test_widget_intersection_removed(self):
+        """相交 Widget 清值+删除（2026-09-15 二期）：字段值存 /V 不在内容流，
+        涂黑与文本验证都够不到。注意：pdfminer 不提取字段值，断言走原始
+        字节（/V 明文）+ PyMuPDF 结构双通道。"""
         data = _make_widget_pdf()
         out, report = redact(
             data, "rects", [{"page": 1, "x": 90, "y": 190, "w": 200, "h": 60}], {}
         )
-        assert report["widgetWarningPages"] == [1]
+        assert report["widgetsRemoved"] == [1]
         assert report["annotsRemoved"] == 0
+        # 原始字节断言：被删字段的 /V 值必须彻底消失（AcroForm 层含外观流）
+        assert b"sensitivedata" not in out
+        # 不相交字段的值必须原样保留
+        assert b"keepme_value" in out
+        # 结构断言：输出文档只剩 keep_field 一个 widget，且值完好
+        doc = fitz.open(stream=out, filetype="pdf")
+        widgets = {w.field_name: w.field_value for w in doc[0].widgets()}
+        doc.close()
+        assert widgets == {"keep_field": "keepme_value"}
+
+    def test_embedded_files_reported(self):
+        """附件层不在涂黑范围（用户已拍板不处理）——但必须检测并写入报告，
+        前端据此提示用户自行确认附件。"""
+        data = _make_widget_pdf()
+        src = fitz.open(stream=data, filetype="pdf")
+        src.embfile_add("attachment.txt", b"secret-in-attachment")
+        data_with_attachment = src.tobytes()
+        src.close()
+
+        out, report = redact(
+            data_with_attachment,
+            "rects",
+            [{"page": 1, "x": 90, "y": 190, "w": 200, "h": 60}],
+            {},
+        )
+        assert report["embeddedFiles"] == 1
 
     def test_all_annot_types_with_contents_removed(self):
         """对抗审查：Square/Text 等注释的 /Contents 藏原文 → 相交即删。

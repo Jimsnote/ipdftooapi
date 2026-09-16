@@ -221,10 +221,13 @@ def _remove_overlapping_annots(
     任何注释类型的 /Contents 都可能藏有原文（Square/Text/Highlight/FreeText/
     Stamp...），且注释内容不进文本验证通道——漏删等于永久泄露（2026-09-15
     对抗审查实测）。宁滥勿缺：相交即删。
-    Widget（AcroForm 表单字段）M0 只记录提示不删除（设计 §3.8）。
-    返回 (删除注释数, 出现相交 widget 的页号列表[1 基])。
+    Widget（AcroForm 表单字段）同理：字段值存 AcroForm /V 不在页面内容流，
+    涂黑覆盖不到、文本验证也扫不到（2026-09-15 二期）——相交字段清值后
+    整体删除，其余字段保留可继续填写。
+    返回 (删除注释数, 被删除 widget 数, 出现 widget 删除的页号列表[1 基])。
     """
     annots_removed = 0
+    widgets_removed = 0
     widget_pages: Set[int] = set()
     pages = sorted({h.page for h in hits})
     for page_index in pages:
@@ -236,8 +239,17 @@ def _remove_overlapping_annots(
                 annots_removed += 1
         for widget in list(page.widgets() or []):
             if any(rect.intersects(widget.rect) for rect in hit_rects):
+                # 先清值（/V 可能残留于 AcroForm 层）再删字段；个别字段类型
+                # （如签名/列表框）清值可能抛异常，不应阻断删除本身
+                try:
+                    widget.field_value = ""
+                    widget.update()
+                except Exception:
+                    pass
+                page.delete_widget(widget)
+                widgets_removed += 1
                 widget_pages.add(page_index + 1)
-    return annots_removed, sorted(widget_pages)
+    return annots_removed, widgets_removed, sorted(widget_pages)
 
 
 def _scrub_outline(doc: fitz.Document, literal_targets: Set[str]) -> int:
@@ -469,7 +481,9 @@ def redact(
             elif h.source == "rect":
                 rect_count += 1
 
-        annots_removed, widget_pages = _remove_overlapping_annots(doc, hits)
+        annots_removed, widgets_removed, widget_pages = _remove_overlapping_annots(
+            doc, hits
+        )
 
         for h in hits:
             page = doc[h.page]
@@ -523,7 +537,8 @@ def redact(
             "rasterizedPages": sorted(p + 1 for p in rasterize_pages),
             "imagePages": sorted(p + 1 for p in image_pages),
             "annotsRemoved": annots_removed,
-            "widgetWarningPages": widget_pages,
+            "widgetsRemoved": widget_pages,
+            "embeddedFiles": doc.embfile_count(),
             "verified": True,
         }
         logger.info(
