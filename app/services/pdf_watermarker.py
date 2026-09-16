@@ -76,6 +76,9 @@ class PDFWatermarker:
         self.input_path = input_path
         if not os.path.exists(input_path):
             raise FileNotFoundError(f"Input file not found: {input_path}")
+        with fitz.open(input_path) as doc:
+            if doc.needs_pass or doc.is_encrypted:
+                raise ValueError("PDF 已加密，请先用「解除 PDF 密码」工具解密后再加水印")
 
     @property
     def total_pages(self) -> int:
@@ -101,8 +104,11 @@ class PDFWatermarker:
             raise ValueError("不支持的水印颜色")
         if layout not in ("tile", "center"):
             raise ValueError("水印布局只支持 tile / center")
-        if fontsize < 8 or fontsize > 120:
+        if not math.isfinite(fontsize) or fontsize < 8 or fontsize > 120:
+            # isfinite 拦截 NaN/inf（pydantic float 默认放行 nan，范围比较对 nan 恒 False）
             raise ValueError("水印字号须在 8-120 之间")
+        if not math.isfinite(opacity):
+            raise ValueError("水印透明度无效")
 
         rgb = TEXT_COLORS[color]
         doc = fitz.open(self.input_path)
@@ -150,8 +156,14 @@ class PDFWatermarker:
             raise ValueError("水印图片为空")
         if layout not in ("tile", "center"):
             raise ValueError("水印布局只支持 tile / center")
-        if width_fraction < 0.1 or width_fraction > 0.8:
+        if (
+            not math.isfinite(width_fraction)
+            or width_fraction < 0.1
+            or width_fraction > 0.8
+        ):
             raise ValueError("图片宽度占比须在 0.1-0.8 之间")
+        if not math.isfinite(opacity):
+            raise ValueError("水印透明度无效")
 
         prepared = _prepare_image_bytes(image_bytes, opacity, ROTATION_DEG)
         doc = fitz.open(self.input_path)
@@ -241,9 +253,9 @@ class PDFWatermarker:
                 end_num = int(end.strip())
                 if start_num > end_num:
                     raise ValueError(f"页码区间无效：{part}")
-                for p in range(start_num, end_num + 1):
-                    if 1 <= p <= total_pages:
-                        result.add(p)
+                # 区间先夹到 [1, total_pages] 再迭代：防超大区间 DoS
+                for p in range(max(1, start_num), min(end_num, total_pages) + 1):
+                    result.add(p)
             else:
                 p = int(part.strip())
                 if 1 <= p <= total_pages:

@@ -29,6 +29,9 @@ class PDFRotator:
         self.input_path = input_path
         if not os.path.exists(input_path):
             raise FileNotFoundError(f"Input file not found: {input_path}")
+        with fitz.open(input_path) as doc:
+            if doc.needs_pass or doc.is_encrypted:
+                raise ValueError("PDF 已加密，请先用「解除 PDF 密码」工具解密后再旋转")
 
     @property
     def total_pages(self) -> int:
@@ -98,9 +101,10 @@ class PDFRotator:
                 end_num = int(end.strip())
                 if start_num > end_num:
                     raise ValueError(f"页码区间无效：{part}")
-                for p in range(start_num, end_num + 1):
-                    if 1 <= p <= total_pages:
-                        result.add(p)
+                # 区间先夹到 [1, total_pages] 再迭代：防 "1-99999999"
+                # 这类超大区间把循环撑到上亿次（DoS）
+                for p in range(max(1, start_num), min(end_num, total_pages) + 1):
+                    result.add(p)
             else:
                 p = int(part.strip())
                 if 1 <= p <= total_pages:

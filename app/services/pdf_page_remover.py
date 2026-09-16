@@ -71,9 +71,11 @@ class PDFPageRemover:
                 start, end = part.split("-", 1)
                 start_num = int(start.strip())
                 end_num = int(end.strip())
-                for p in range(start_num, end_num + 1):
-                    if 1 <= p <= total_pages:
-                        result.add(p)
+                if start_num > end_num:
+                    raise ValueError(f"页码区间无效：{part}")
+                # 区间先夹到 [1, total_pages] 再迭代：防超大区间 DoS
+                for p in range(max(1, start_num), min(end_num, total_pages) + 1):
+                    result.add(p)
             else:
                 p = int(part.strip())
                 if 1 <= p <= total_pages:

@@ -19,6 +19,7 @@ from app.services.pdf_unlocker import PDFUnlocker
 from app.services.pdf_page_remover import PDFPageRemover
 from app.services.pdf_rotator import PDFRotator
 from app.services.pdf_watermarker import PDFWatermarker
+from app.services.pdf_organizer import PDFOrganizer, parse_order
 from app.services.pdf_header_footer import PDFHeaderFooter
 from app.services.pdf_to_word import PDFToWordConverter
 from app.services.ofd_validator import (
@@ -320,8 +321,18 @@ async def analyze_pdf(file: UploadFile = File(...)):
             "total_pages": total_pages,
             "filename": file.filename,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"PDF analyze task {task_id} failed: {e}")
+        # pypdf 对加密文件在 len(reader.pages) 时抛"not been decrypted"，
+        # 单独识别给出可操作提示（引导到解锁工具），而非 500
+        msg = str(e).lower()
+        if "decrypt" in msg or "password" in msg or "encrypt" in msg:
+            raise HTTPException(
+                status_code=400,
+                detail="PDF 已加密，请先用「解除 PDF 密码」工具解密后再上传",
+            )
         raise_processing_error(e)
 
 
@@ -513,6 +524,56 @@ async def watermark_pdf(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Watermark task {task_id} failed: {e}")
+        raise_processing_error(e)
+
+
+@router.post("/organize", response_model=TaskResponse, summary="Reorganize pages of a PDF (reorder / delete / rotate)")
+async def organize_pdf(
+    task_id: str = Form(...),
+    order: str = Form(""),
+):
+    """按前端传来的输出页序重建文档。
+
+    order 形如 "3,1,2"（重排）、"1,3,5"（删除第 2/4 页）、"2:90,1"（单页旋转），
+    每项为 "N" 或 "N:angle"（顺时针叠加角度）。
+    """
+    task_dir = get_task_dir(TEMP_DIR, task_id)
+    if not os.path.exists(task_dir):
+        raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
+
+    input_path = safe_join(task_dir, "input.pdf")
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail="未找到 PDF 文件，请重新上传")
+
+    try:
+        organizer = PDFOrganizer(input_path)
+        total_pages = organizer.total_pages
+
+        entries = parse_order(order, total_pages)
+
+        output_path = safe_join(task_dir, "organized.pdf")
+        src_total, out_total = organizer.organize(entries, output_path)
+
+        if os.path.exists(input_path):
+            os.remove(input_path)
+
+        download_url = f"/api/v1/pdf/download/{task_id}"
+        logger.info(
+            f"Organize task {task_id} completed: {src_total} -> {out_total} pages"
+        )
+        return TaskResponse(
+            task_id=task_id,
+            status="completed",
+            message=f"整理完成：{src_total} 页 -> {out_total} 页",
+            download_url=download_url,
+            file_count=1,
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Organize task {task_id} failed: {e}")
         raise_processing_error(e)
 
 
@@ -1025,6 +1086,14 @@ async def jpg_to_pdf(
             detail=f"Maximum {settings.MAX_FILES_PER_REQUEST} files allowed",
         )
 
+    # 总量守卫：单文件各 ≤ MAX_UPLOAD_SIZE，但 20 × 50MB 合计可达 1GB
+    total_size = sum(f.size or 0 for f in files)
+    if total_size > 2 * settings.MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="所有图片加起来不能超过 100MB，请分批处理",
+        )
+
     task_id, task_dir = make_task_dir(TEMP_DIR)
 
     input_paths = []
@@ -1119,7 +1188,7 @@ async def download_file(task_id: str):
 _GENERIC_OUTPUT_STEMS = {
     "converted", "merged", "compressed", "images", "output",
     "protected", "unlocked", "removed", "result", "split-result",
-    "extracted-images", "header-footer",
+    "extracted-images", "header-footer", "organized", "rotated", "watermarked",
 }
 
 

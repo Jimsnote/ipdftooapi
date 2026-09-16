@@ -185,12 +185,129 @@ class TestWatermarkService:
         assert "page 1 body text" in doc[0].get_text()
         doc.close()
 
+# ---------- 对抗审查 R1：输入健壮性 ----------
+
+
+class TestOpacityClamp:
     def test_opacity_clamped(self, tmp_path):
         from app.services.pdf_watermarker import _clamp_opacity
 
         assert _clamp_opacity(0.01) == 0.05
         assert _clamp_opacity(0.9) == 0.5
         assert _clamp_opacity(0.2) == 0.2
+
+
+class TestParsePageListRangeDoS:
+    """超大页码区间不得把循环撑到上亿次（rotate/watermark 同款解析）。"""
+
+    def test_rotator_huge_range(self):
+        import time
+
+        t0 = time.monotonic()
+        result = PDFRotator.parse_page_list("1-99999999", 5)
+        elapsed = time.monotonic() - t0
+        assert result == {1, 2, 3, 4, 5}
+        assert elapsed < 2.0
+
+    def test_watermarker_huge_range(self):
+        import time
+
+        t0 = time.monotonic()
+        result = PDFWatermarker.parse_page_list("1-99999999", 5)
+        elapsed = time.monotonic() - t0
+        assert result == {1, 2, 3, 4, 5}
+        assert elapsed < 2.0
+
+    def test_rotator_range_beyond_total(self):
+        assert PDFRotator.parse_page_list("3-8", 5) == {3, 4, 5}
+
+    def test_rotator_partial_overlap(self):
+        """0-2 夹到 1-2；7-10 全部超出 total=5 → 空区间不产出页码。"""
+        assert PDFRotator.parse_page_list("0-2,7-10", 5) == {1, 2}
+
+
+class TestWatermarkNaNInputs:
+    """pydantic float 默认放行 nan/inf：范围比较对 NaN 恒 False 会绕过校验。"""
+
+    def _wm(self, tmp_path):
+        src = tmp_path / "in.pdf"
+        src.write_bytes(_pdf_bytes(1))
+        return PDFWatermarker(str(src))
+
+    def test_nan_fontsize_rejected(self, tmp_path):
+        wm = self._wm(tmp_path)
+        with pytest.raises(ValueError, match="字号"):
+            wm.watermark_text("水印", str(tmp_path / "o.pdf"), fontsize=float("nan"))
+
+    def test_nan_opacity_text_rejected(self, tmp_path):
+        wm = self._wm(tmp_path)
+        with pytest.raises(ValueError, match="透明度"):
+            wm.watermark_text("水印", str(tmp_path / "o.pdf"), opacity=float("nan"))
+
+    def test_nan_width_fraction_rejected(self, tmp_path):
+        wm = self._wm(tmp_path)
+        with pytest.raises(ValueError, match="宽度占比"):
+            wm.watermark_image(
+                _png_bytes(), str(tmp_path / "o.pdf"), width_fraction=float("nan")
+            )
+
+    def test_nan_opacity_image_rejected(self, tmp_path):
+        wm = self._wm(tmp_path)
+        with pytest.raises(ValueError, match="透明度"):
+            wm.watermark_image(
+                _png_bytes(), str(tmp_path / "o.pdf"), opacity=float("inf")
+            )
+
+
+# ---------- 对抗审查 R2：数据一致性 ----------
+
+
+def _pdf_with_widget(value: str = "张三") -> bytes:
+    """带文本表单字段（Widget）的单页 PDF。
+
+    坑（PyMuPDF 实测）：field_value 必须在 add_widget 之前预设进 Widget 结构、
+    且 CJK 值需 text_font="china-s"，否则 tobytes() 后 /V 为空。
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=595.27, height=841.89)
+    w = fitz.Widget()
+    w.field_name = "name"
+    w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+    w.rect = fitz.Rect(72, 72, 250, 100)
+    w.text_fontsize = 12
+    w.text_font = "china-s"
+    w.field_value = value
+    widget = page.add_widget(w)
+    widget.update()
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+class TestWatermarkPreservesFormFields:
+    """水印是 overlay 覆盖层，不得破坏 AcroForm 字段及其值（R2）。"""
+
+    def test_text_watermark_keeps_widget_value(self, tmp_path):
+        src = tmp_path / "in.pdf"
+        src.write_bytes(_pdf_with_widget())
+        wm = PDFWatermarker(str(src))
+        wm.watermark_text("内部资料", str(tmp_path / "out.pdf"), layout="center")
+        doc = fitz.open(str(tmp_path / "out.pdf"))
+        widgets = list(doc[0].widgets() or [])
+        assert len(widgets) == 1
+        assert widgets[0].field_value == "张三"
+        doc.close()
+
+    def test_image_watermark_keeps_widget_value(self, tmp_path):
+        src = tmp_path / "in.pdf"
+        src.write_bytes(_pdf_with_widget())
+        wm = PDFWatermarker(str(src))
+        wm.watermark_image(_png_bytes(), str(tmp_path / "out.pdf"), layout="center")
+        doc = fitz.open(str(tmp_path / "out.pdf"))
+        widgets = list(doc[0].widgets() or [])
+        assert len(widgets) == 1
+        assert widgets[0].field_value == "张三"
+        doc.close()
 
 
 # ---------- 路由层 ----------
