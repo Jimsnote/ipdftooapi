@@ -15,6 +15,17 @@ class InvoiceExtractError(Exception):
     """单文件提取失败（路由层捕获后转为 failures 条目，不阻断整批）。"""
 
 
+def reject_dtd(data: bytes) -> None:
+    """拒绝含 DTD/实体声明的 XML（防 billion laughs 实体展开 DoS）。
+
+    xml.etree.ElementTree 对内部实体展开无防护；数电票 XML 与 OFD 内的
+    发票 XML 均不含 DTD，此处前置拒绝零误杀。
+    """
+    head = data[:4096].lstrip(b"\xef\xbb\xbf \t\r\n")
+    if b"<!DOCTYPE" in head or b"<!ENTITY" in head or b"<!ENTITY" in data[-4096:]:
+        raise InvoiceExtractError("XML 含不支持的 DTD/实体声明")
+
+
 def clean_amount(raw: Optional[str]) -> Optional[str]:
     """清洗金额：去掉 ¥/￥/,/空格；非数字样貌返回 None。
 

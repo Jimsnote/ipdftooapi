@@ -24,7 +24,10 @@ class PDFSplitter:
         elif mode == "ranges":
             return self._split_ranges(value, output_dir)
         elif mode == "fixed":
-            return self._split_fixed(int(value) if value else 1, output_dir)
+            pages_per_file = int(value) if value else 1
+            if pages_per_file < 1:
+                raise ValueError("每个文件页数需为正整数")
+            return self._split_fixed(pages_per_file, output_dir)
         else:
             raise ValueError(f"Unknown split mode: {mode}")
 
@@ -49,11 +52,25 @@ class PDFSplitter:
         for idx, part in enumerate(parts):
             if "-" in part:
                 start, end = part.split("-")
-                start_page = max(0, int(start) - 1)
-                end_page = min(self.total_pages, int(end))
+                start_num = int(start)
+                end_num = int(end)
+                if start_num > end_num:
+                    raise ValueError(f"页码区间无效：{part}")
+                start_page = max(0, start_num - 1)
+                end_page = min(self.total_pages, end_num)
             else:
-                start_page = int(part) - 1
+                start_num = int(part)
+                start_page = start_num - 1
                 end_page = start_page + 1
+
+            # 区间被夹取后为空（如 "5-2"、"999" 单页越界、整体超出文档页数）
+            # 时不产出空 PDF
+            if (
+                start_page >= end_page
+                or start_page >= self.total_pages
+                or end_page <= 0
+            ):
+                raise ValueError(f"页码区间 {part} 超出文档页数范围（共 {self.total_pages} 页）")
 
             writer = PdfWriter()
             for i in range(start_page, end_page):

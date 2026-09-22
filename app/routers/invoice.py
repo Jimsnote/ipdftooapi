@@ -26,7 +26,9 @@ def raise_processing_error(error: Exception):
         raise error
     if isinstance(error, ValueError):
         raise HTTPException(status_code=400, detail=str(error))
-    raise HTTPException(status_code=500, detail=str(error))
+    # 未知异常不向客户端泄露内部细节，完整信息仅入日志
+    logger.error(f"Invoice processing error: {error!r}")
+    raise HTTPException(status_code=500, detail="服务器处理失败，请稍后重试")
 
 
 @router.post("/analyze", summary="Analyze uploaded invoices (PDF/OFD mixed) and return dimensions")

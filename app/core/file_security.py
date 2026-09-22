@@ -14,6 +14,8 @@ ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 OLE_MAGIC = (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",)
 JPEG_MAGIC = (b"\xff\xd8\xff",)
 PNG_MAGIC = (b"\x89PNG\r\n\x1a\n",)
+# WEBP 是 RIFF 容器：RIFF 头 + 偏移 8 处的 "WEBP" 标识
+WEBP_MAGIC = (b"RIFF",)
 
 OFFICE_OPENXML_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
 OFFICE_LEGACY_EXTENSIONS = {".doc", ".ppt", ".xls"}
@@ -83,6 +85,10 @@ def validate_file_header(file: UploadFile, suffix: str) -> None:
         _require_magic(header, JPEG_MAGIC)
     elif suffix == ".png":
         _require_magic(header, PNG_MAGIC)
+    elif suffix == ".webp":
+        # RIFF 容器 + 偏移 8 的 WEBP 标识（OCR 扫描件链路支持 webp）
+        if not (header.startswith(b"RIFF") and len(header) >= 12 and header[8:12] == b"WEBP"):
+            raise InvalidFileTypeError()
     else:
         raise InvalidFileTypeError()
 

@@ -72,7 +72,7 @@ def analyze_ofd_invoices(files: List[UploadFile] = File(...)):
             raise
         except Exception as e:
             logger.error(f"OFD invoice analyze task {task_id} failed: {e}")
-            raise HTTPException(status_code=500, detail=f"OFD 发票处理失败：{e}")
+            raise HTTPException(status_code=500, detail="OFD 发票处理失败，请重试或更换文件")
 
 
 @router.post("/merge", response_model=TaskResponse, summary="合并 OFD 发票为 A4 PDF")
@@ -130,7 +130,7 @@ def merge_ofd_invoices(
             raise
         except Exception as e:
             logger.error(f"OFD invoice merge task {task_id} failed: {e}")
-            raise HTTPException(status_code=500, detail=f"OFD 发票合并失败：{e}")
+            raise HTTPException(status_code=500, detail="OFD 发票合并失败，请重试")
 
 
 @router.get("/download/{task_id}", summary="下载合并后的 OFD 发票 A4 PDF")

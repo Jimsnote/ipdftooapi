@@ -97,7 +97,7 @@ def scan_to_pdf(file: UploadFile = File(...)):
         raise
     except Exception as e:
         logger.error(f"scan-to-pdf task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=f"OCR 处理失败：{e}")
+        raise HTTPException(status_code=500, detail="OCR 处理失败，请重试或更换文件")
 
 
 @router.get("/download/{task_id}", summary="下载 OCR 结果")

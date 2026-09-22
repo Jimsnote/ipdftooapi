@@ -64,7 +64,9 @@ def raise_processing_error(error: Exception):
         raise error
     if isinstance(error, ValueError):
         raise HTTPException(status_code=400, detail=str(error))
-    raise HTTPException(status_code=500, detail=str(error))
+    # 未知异常不向客户端泄露内部细节（路径/库名/堆栈信息），完整信息仅入日志
+    logger.error(f"Unhandled processing error: {error!r}")
+    raise HTTPException(status_code=500, detail="服务器处理失败，请稍后重试")
 
 
 def validate_pdf(file: UploadFile):
@@ -1161,6 +1163,11 @@ async def download_file(task_id: str):
         ("converted.md", "converted.md"),
         ("images.zip", "images.zip"),
         ("extracted-images.zip", "extracted-images.zip"),
+        # header-footer 流程不删 input.pdf，候选表必须显式包含其输出名，
+        # 否则 fallback「取目录第一个 pdf」在 Linux（ext4 哈希序）下可能
+        # 返回未处理的原始 input.pdf（对抗审查 2026-09-17 修复）
+        ("header-footer.pdf", "header-footer.pdf"),
+        ("part_1.pdf", "part_1.pdf"),
     ]
     for c, download_name in candidates:
         path = safe_join(task_dir, c)
@@ -1171,8 +1178,11 @@ async def download_file(task_id: str):
                 filename=_derive_download_name(download_name, original_stem),
             )
 
-    # Fallback: first pdf/zip in dir
+    # Fallback: first pdf/zip in dir（跳过 input.pdf——它是用户上传的原始
+    # 文件，绝不能作为处理结果返回）
     for f in os.listdir(task_dir):
+        if f == "input.pdf":
+            continue
         if f.endswith((".pdf", ".zip")):
             download_name = "result.zip" if f.endswith(".zip") else "result.pdf"
             return FileResponse(

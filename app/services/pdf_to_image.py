@@ -47,9 +47,18 @@ class PDFToImageConverter:
                 page_indices = []
                 for part in pages.split(","):
                     part = part.strip()
+                    if not part:
+                        continue
                     if "-" in part:
                         start, end = part.split("-")
-                        page_indices.extend(range(int(start) - 1, int(end)))
+                        start_num = int(start)
+                        end_num = int(end)
+                        if start_num > end_num:
+                            raise ValueError(f"页码区间无效：{part}")
+                        # 夹取后再展开，防 "1-99999999" 超大区间吃满内存
+                        page_indices.extend(
+                            range(max(0, start_num - 1), min(end_num, total_pages))
+                        )
                     else:
                         page_indices.append(int(part) - 1)
                 # Validate and deduplicate

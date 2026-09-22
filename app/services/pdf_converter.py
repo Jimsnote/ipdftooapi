@@ -1,6 +1,7 @@
 import os
 from typing import Optional
 
+import fitz  # PyMuPDF
 import pymupdf4llm
 
 from app.core.logger import get_logger
@@ -34,7 +35,7 @@ class PDFToMarkdownConverter:
         """
         kwargs = {}
         if pages:
-            kwargs["pages"] = self._parse_pages(pages)
+            kwargs["pages"] = self._parse_pages(pages, input_path)
 
         # Convert to markdown string
         md_text = pymupdf4llm.to_markdown(input_path, **kwargs)
@@ -58,23 +59,39 @@ class PDFToMarkdownConverter:
         }
 
     @staticmethod
-    def _parse_pages(pages_str: str) -> list:
-        """Parse page range string to list of 0-based page numbers.
+    def _parse_pages(pages_str: str, input_path: str) -> list:
+        """Parse page range string to a clamped, deduplicated list of 0-based page numbers.
 
         Examples:
             "1-3,5,7-10" -> [0,1,2,4,6,7,8,9]
             "all" -> None (handled by caller)
+
+        先取总页数、再夹到 [0, total-1] 展开：防超大区间把内存撑爆（DoS）。
         """
         if pages_str.lower() == "all":
             return None
 
-        result = []
+        with fitz.open(input_path) as doc:
+            total = len(doc)
+
+        result = set()
         parts = [p.strip() for p in pages_str.split(",")]
         for part in parts:
+            if not part:
+                continue
             if "-" in part:
                 start, end = part.split("-")
-                # Convert to 0-based
-                result.extend(range(int(start) - 1, int(end)))
+                start_num = int(start)
+                end_num = int(end)
+                if start_num > end_num:
+                    raise ValueError(f"页码区间无效：{part}")
+                # 夹取后再迭代，防 "1-99999999" 这类超大区间
+                result.update(range(max(0, start_num - 1), min(end_num, total)))
             else:
-                result.append(int(part) - 1)
+                p = int(part) - 1
+                if 0 <= p < total:
+                    result.add(p)
+        result = sorted(result)
+        if not result:
+            raise ValueError("没有有效的页码范围")
         return result

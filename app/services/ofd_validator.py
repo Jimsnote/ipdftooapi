@@ -137,6 +137,15 @@ def validate_ofd_zip(path: str) -> None:
                         chunk = fh.read(1024 * 1024)
                         if not chunk:
                             break
+                        # XML 条目顺带拒绝 DTD/实体声明（billion laughs DoS；
+                        # easyofd 内部用 xml.etree 解析，无实体防护。OFD 规范
+                        # 不使用 DTD，拒绝零误杀）
+                        if actual_len == 0 and info.filename.lower().endswith(".xml"):
+                            head = chunk.lstrip(b"\xef\xbb\xbf \t\r\n")
+                            if b"<!DOCTYPE" in head or b"<!ENTITY" in head:
+                                raise OfdFileError(
+                                    f"XML 条目含不支持的 DTD/实体声明（{info.filename}）"
+                                )
                         actual_len += len(chunk)
                         if actual_len > info.file_size:
                             raise OfdFileError(

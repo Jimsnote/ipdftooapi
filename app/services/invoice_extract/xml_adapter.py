@@ -12,6 +12,7 @@ from app.services.invoice_extract.base import (
     InvoiceExtractError,
     clean_amount,
     normalize_cn_date,
+    reject_dtd,
     validate_record,
 )
 
@@ -29,6 +30,7 @@ def _first_text(root: ET.Element, tag: str) -> str:
 
 
 def parse_xml(xml_bytes: bytes, source_file: str) -> InvoiceRecord:
+    reject_dtd(xml_bytes)
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError as e:

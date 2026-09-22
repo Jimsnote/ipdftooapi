@@ -27,7 +27,7 @@ async def render_id_photo(payload: IDPhotoRenderRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"ID photo render task {task_id} failed: {e}")
-        raise HTTPException(status_code=500, detail=f"渲染失败: {e}")
+        raise HTTPException(status_code=500, detail="渲染失败，请稍后重试")
 
     download_url = f"/api/v1/id-photo/download/{task_id}"
     return TaskResponse(

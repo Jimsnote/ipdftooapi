@@ -97,6 +97,9 @@ class ImageToPDFConverter:
                     new_h = canvas_h
                     new_w = int(new_h * img_ratio)
 
+                # 极端长宽比时防 0 尺寸（PIL resize 对 0 维度报错）
+                new_w = max(1, new_w)
+                new_h = max(1, new_h)
                 img = img.resize((new_w, new_h), Image.LANCZOS)
                 paste_x = margin + (canvas_w - new_w) // 2
                 paste_y = margin + (canvas_h - new_h) // 2

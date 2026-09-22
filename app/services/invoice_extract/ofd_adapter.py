@@ -24,10 +24,17 @@ from app.services.invoice_extract.base import (
     InvoiceExtractError,
     clean_amount,
     normalize_cn_date,
+    reject_dtd,
     validate_record,
 )
 
 _NS = "{http://www.ofdspec.org/2016}"
+
+
+def _parse_xml(data: bytes) -> ET.Element:
+    """带 DTD/实体拒绝的 XML 解析（防 billion laughs DoS，见 base.reject_dtd）。"""
+    reject_dtd(data)
+    return ET.fromstring(data)
 
 
 def _local(tag: str) -> str:
@@ -82,7 +89,7 @@ def parse_ofd_zip(zf: zipfile.ZipFile, source_file: str) -> InvoiceRecord:
     rec = None
     if custom_tag_name:
         try:
-            tag_root = ET.fromstring(zf.read(custom_tag_name))
+            tag_root = _parse_xml(zf.read(custom_tag_name))
         except ET.ParseError as e:
             raise InvoiceExtractError(f"CustomTag.xml 解析失败：{e}") from e
         rec = _extract_via_custom_tag(tag_root, texts, source_file)
@@ -108,7 +115,7 @@ def _collect_text_objects(zf: zipfile.ZipFile) -> _OfdText:
         if not (is_page or is_tpl):
             continue
         try:
-            root = ET.fromstring(zf.read(name))
+            root = _parse_xml(zf.read(name))
         except ET.ParseError:
             continue
         box = None
