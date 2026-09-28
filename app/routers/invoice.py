@@ -1,3 +1,4 @@
+import json
 import os
 from typing import List
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
@@ -125,20 +126,46 @@ async def merge_invoices(
     page_numbers: bool = Form(True),
     layout: str = Form("stacked"),
     binding_mm: float = Form(0),
+    order: str = Form(""),
 ):
     task_dir = get_task_dir(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
 
-    # Collect all PDF files in task dir（invoice_NNN.pdf，含 OFD 转换产物）
-    pdf_paths = [
-        safe_join(task_dir, f)
-        for f in os.listdir(task_dir)
-        if f.lower().endswith(".pdf")
-    ]
-
-    if not pdf_paths:
+    # 收集任务目录内的发票 PDF（invoice_NNN.pdf；input_*.ofd 是转换源，不参与合并）。
+    # sorted() 保证缺省顺序 = 上传顺序（os.listdir 在 ext4 上不保证顺序，大批次可能乱序）
+    invoice_files = sorted(
+        f for f in os.listdir(task_dir)
+        if f.startswith("invoice_") and f.lower().endswith(".pdf")
+    )
+    if not invoice_files:
         raise HTTPException(status_code=404, detail="未找到发票文件")
+
+    pdf_paths: List[str]
+    if order.strip():
+        # 前端传入用户最终确认的发票顺序：JSON 数组，元素为 0-based 原始序号
+        # （对应 analyze 的上传顺序，文件名即 invoice_{序号+1:03d}.pdf）。
+        # 用户删除/排序只改前端列表，必须由 order 显式告知，否则产物与预览不一致。
+        try:
+            idx_list = json.loads(order)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="发票顺序参数格式错误，请重新上传")
+        if (
+            not isinstance(idx_list, list)
+            or not idx_list
+            or not all(isinstance(i, int) and not isinstance(i, bool) for i in idx_list)
+            or len(set(idx_list)) != len(idx_list)
+            or not set(idx_list) <= set(range(len(invoice_files)))
+        ):
+            # 允许 order 为 [0..N-1] 的任意无重复子集：覆盖"排序"（全量排列）与
+            # "删除"（子集，被删发票的索引不出现）两种场景
+            raise HTTPException(
+                status_code=400,
+                detail="发票顺序与任务内容不一致，请重新上传发票后再合并",
+            )
+        pdf_paths = [safe_join(task_dir, f"invoice_{i + 1:03d}.pdf") for i in idx_list]
+    else:
+        pdf_paths = [safe_join(task_dir, f) for f in invoice_files]
 
     try:
         merger = InvoiceMerger()
