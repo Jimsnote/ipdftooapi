@@ -4,7 +4,7 @@ import math
 import os
 from typing import Dict, List, Optional, Tuple
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from app.core.logger import get_logger
 from app.schemas.id_photo import CanvasImage, CanvasText, TiledWatermark
@@ -132,7 +132,10 @@ class IDPhotoRenderer:
         try:
             data = _parse_base64(raw_src)
             _validate_image_header(data)
-            source = Image.open(io.BytesIO(data)).convert("RGBA")
+            # 应用 EXIF orientation：前端画布（浏览器 <img>）按 EXIF 显示为正立，
+            # 后端必须同样转正，否则带方向标记的照片在 PDF 里会侧倒、与画布预览不一致
+            source = ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
+            source = source.convert("RGBA")
         except ValueError:
             raise
         except Exception as e:

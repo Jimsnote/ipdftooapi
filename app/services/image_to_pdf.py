@@ -1,6 +1,6 @@
 import os
 from typing import List, Literal
-from PIL import Image
+from PIL import Image, ImageOps
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -46,6 +46,9 @@ class ImageToPDFConverter:
         pil_images = []
         for path in image_paths:
             img = Image.open(path)
+            # 应用 EXIF orientation：手机横拍/竖拍的照片像素不旋转、方向存在 EXIF 标记里，
+            # 不转正会导致 PDF 里图片侧倒（与浏览器/相册里看到的方向不一致）
+            img = ImageOps.exif_transpose(img)
             # Convert to RGB if necessary (handles RGBA, P mode, etc.)
             if img.mode in ("RGBA", "P", "LA", "L"):
                 # For transparent images, composite on white background
