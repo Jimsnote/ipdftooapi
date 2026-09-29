@@ -53,6 +53,14 @@ class PDFCompressor:
         if level not in self.LEVELS:
             raise ValueError(f"Unknown compression level: {level}")
 
+        # 部署冒烟新发现（#19 关联）：生产 Ghostscript 10.x 对加密 PDF 返回码为 0
+        # 且仍写出空白壳 PDF（"No pages will be processed"），用户会静默拿到废文件；
+        # pypdf fallback 则抛 FileNotDecryptedError。统一在入口拦截，给 400 中文引导。
+        from pypdf import PdfReader
+
+        if PdfReader(self.file_path).is_encrypted:
+            raise ValueError("PDF 已加密，请先用「解除 PDF 密码」工具解密后再压缩")
+
         settings = self.LEVELS[level]
         gs_cmd = self._find_gs()
 

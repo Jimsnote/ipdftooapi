@@ -354,6 +354,32 @@ class TestFallbackCompressNoGrow:
 
 
 # ---------------------------------------------------------------------------
+# #19 关联（部署冒烟新发现）：加密 PDF 在有 gs 的环境产出空白壳
+# ---------------------------------------------------------------------------
+
+class TestCompressorEncryptedPrecheck:
+    def test_encrypted_pdf_rejected_at_entry(self, tmp_path):
+        """生产 gs 10.x 对加密 PDF returncode=0 且产出空白壳（静默废文件）；
+        pypdf fallback 抛 FileNotDecryptedError。入口统一拦截 → ValueError→400。"""
+        from pypdf import PdfReader  # noqa: F401 确认依赖在场
+
+        enc = _write_encrypted_pdf(str(tmp_path / "enc.pdf"))
+        out = str(tmp_path / "out.pdf")
+        with pytest.raises(ValueError) as exc_info:
+            PDFCompressor(enc).compress(out, level="normal")
+        assert "已加密" in str(exc_info.value)
+        assert not os.path.exists(out)  # 不产出任何废文件
+
+    def test_normal_pdf_still_compressible(self, tmp_path, monkeypatch):
+        src = _write_pdf(str(tmp_path / "in.pdf"))
+        out = str(tmp_path / "out.pdf")
+        compressor = PDFCompressor(src)
+        monkeypatch.setattr(compressor, "_find_gs", lambda: None)
+        compressor.compress(out, level="normal")
+        assert os.path.exists(out)
+
+
+# ---------------------------------------------------------------------------
 # #26 证件照水印：透明度方向与前端预览一致
 # ---------------------------------------------------------------------------
 
