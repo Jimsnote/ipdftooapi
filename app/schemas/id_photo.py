@@ -8,11 +8,13 @@ MAX_TOTAL_IMAGE_B64_CHARS = 60 * 1024 * 1024
 
 class CanvasImage(BaseModel):
     id: str
-    x: float = Field(..., description="X position in millimeters")
-    y: float = Field(..., description="Y position in millimeters")
-    width: float = Field(..., description="Width in millimeters", gt=0)
-    height: float = Field(..., description="Height in millimeters", gt=0)
-    rotation: float = Field(0, description="Rotation in degrees")
+    # 审计 #27：坐标/尺寸/旋转加 finite 与范围校验——10⁹mm 坐标会让 PIL paste
+    # 超 C int 抛 OverflowError（裸 500），NaN rotation 会被静默忽略（以为转了实际没转）
+    x: float = Field(..., description="X position in millimeters", ge=-2000, le=2000, allow_inf_nan=False)
+    y: float = Field(..., description="Y position in millimeters", ge=-2000, le=2000, allow_inf_nan=False)
+    width: float = Field(..., description="Width in millimeters", gt=0, le=2000, allow_inf_nan=False)
+    height: float = Field(..., description="Height in millimeters", gt=0, le=2000, allow_inf_nan=False)
+    rotation: float = Field(0, description="Rotation in degrees", ge=-3600, le=3600, allow_inf_nan=False)
     # 图片数据：优先用 src_ref 从 source_images 去重取，否则用内联 src。
     # 一键铺满 A4 时 49 张格子共享同一张原图，用 src_ref 可避免把 base64 发几十遍。
     src: Optional[str] = Field(None, description="Base64 image data (data URL or raw base64); omitted when src_ref is used", max_length=MAX_IMAGE_B64_CHARS)
@@ -20,9 +22,9 @@ class CanvasImage(BaseModel):
     cover: bool = Field(False, description="When true, center-crop the source to the target aspect ratio (avoid distortion)")
     # 规格内裁剪 / 构图：在 cover 基础上再做缩放与平移，修正"头大身子小"等构图问题。
     # crop_zoom > 1 表示放大裁剪（取更小区域）；crop_x/crop_y ∈ [-0.5, 0.5] 表示在 cover 框内平移。
-    crop_zoom: float = Field(1.0, description="Zoom-in factor for in-spec cropping (1 = no zoom)")
-    crop_x: float = Field(0.0, description="Horizontal pan within cover crop box, -0.5..0.5")
-    crop_y: float = Field(0.0, description="Vertical pan within cover crop box, -0.5..0.5")
+    crop_zoom: float = Field(1.0, description="Zoom-in factor for in-spec cropping (1 = no zoom)", ge=1.0, le=4.0, allow_inf_nan=False)
+    crop_x: float = Field(0.0, description="Horizontal pan within cover crop box, -0.5..0.5", ge=-0.5, le=0.5, allow_inf_nan=False)
+    crop_y: float = Field(0.0, description="Vertical pan within cover crop box, -0.5..0.5", ge=-0.5, le=0.5, allow_inf_nan=False)
 
 
 class CanvasText(BaseModel):
@@ -59,7 +61,10 @@ class IDPhotoRenderRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_image_payload_size(self):
+        # 审计 #8：行内 src 与 source_images 一并计入总量——否则 200 项 × 20MB
+        # 内联 src 可完全绕过"请求总图片体积上限"（约 4GB 合法请求体 → OOM）
         total = sum(len(v) for v in self.source_images.values())
+        total += sum(len(img.src) for img in self.images if img.src)
         if total > MAX_TOTAL_IMAGE_B64_CHARS:
             raise ValueError("图片总数据量过大，请压缩图片或减少数量后重试")
         if len(self.source_images) > 200:

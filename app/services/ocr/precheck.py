@@ -62,12 +62,22 @@ def precheck(file_path: str, is_image: bool) -> tuple:
     except Exception as e:
         return False, f"无法解析 PDF：{e}", False
 
+    # 审计 #12：加密 PDF 的 get_text 会抛异常且调用点在路由 try 之外 → 裸 500，这里前置拦截
+    if doc.needs_pass or doc.is_encrypted:
+        doc.close()
+        return False, "PDF 已加密，请先解除密码后再上传", False
+
     pages = len(doc)
     if pages > MAX_PAGES:
         doc.close()
         return False, f"文件 {pages} 页，免费单文件限 {MAX_PAGES} 页，请拆分后上传。", False
 
-    has_text = any(len(p.get_text().strip()) > 50 for p in doc)
+    # 审计 #12：单页读取异常（损坏文件等）不再向外抛出，给明确拒绝文案
+    try:
+        has_text = any(len(p.get_text().strip()) > 50 for p in doc)
+    except Exception as e:
+        doc.close()
+        return False, f"无法读取 PDF 内容：{e}", False
     doc.close()
     if has_text:
         return True, "has_text_layer", True

@@ -101,11 +101,12 @@ def merge_ofd_invoices(
             detail="每页张数仅支持 1、2、4、6、9",
         )
 
-    # merge 收集 task 目录下所有 .pdf（与 invoice 路由一致）
+    # merge 收集 task 目录下的发票 PDF（审计 #16：只认 invoice_ 前缀，
+    # 排除上次 merge 的产物 merged_invoices.pdf，避免重复调用混入旧产物重拼错版）
     pdf_paths = [
         safe_join(task_dir, f)
         for f in os.listdir(task_dir)
-        if f.lower().endswith(".pdf")
+        if f.startswith("invoice_") and f.lower().endswith(".pdf")
     ]
     if not pdf_paths:
         raise HTTPException(status_code=404, detail="未找到发票文件，请重新上传")

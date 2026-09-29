@@ -59,11 +59,22 @@ OFD_EXTENSIONS = (".ofd",)
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 
+from pypdf.errors import PdfReadError
+
+# 审计 #13：加密 PDF 在 pypdf 系服务（split/merge/compress/protect/remove-pages）
+# 统一给 400 中文引导，而非被当服务器故障报 500
+_MSG_ENCRYPTED_PDF = "PDF 已加密，请先用「解除 PDF 密码」工具解密后再上传"
+
+
 def raise_processing_error(error: Exception):
     if isinstance(error, HTTPException):
         raise error
     if isinstance(error, ValueError):
         raise HTTPException(status_code=400, detail=str(error))
+    # FileNotDecryptedError 的 MRO 是 PdfReadError → PyPdfError → Exception，
+    # 不在 ValueError 下；pdf2docx 的 "Require password"（to-word 加密 PDF）同理
+    if isinstance(error, PdfReadError) or "password" in str(error).lower():
+        raise HTTPException(status_code=400, detail=_MSG_ENCRYPTED_PDF)
     # 未知异常不向客户端泄露内部细节（路径/库名/堆栈信息），完整信息仅入日志
     logger.error(f"Unhandled processing error: {error!r}")
     raise HTTPException(status_code=500, detail="服务器处理失败，请稍后重试")
@@ -488,9 +499,26 @@ async def watermark_pdf(
             if wm_image is None or not wm_image.filename:
                 raise HTTPException(status_code=400, detail="请上传水印图片")
             ext = validate_extension(wm_image.filename, (".png", ".jpg", ".jpeg"))
-            image_bytes = await wm_image.read()
-            if len(image_bytes) > 10 * 1024 * 1024:
+            # 审计 #9：先做声明大小预检，再用 16 字节魔数探针（不整读文件），
+            # 最后流式落盘（写入过程强制 10MB 上限）并从盘上读回——
+            # 杜绝数 GB 文件先整体读入内存导致 OOM
+            WM_IMAGE_MAX_SIZE = 10 * 1024 * 1024
+            if wm_image.size and wm_image.size > WM_IMAGE_MAX_SIZE:
                 raise HTTPException(status_code=400, detail="水印图片不能超过 10MB")
+            magic = await wm_image.read(16)
+            await wm_image.seek(0)
+            if ext == ".png" and not magic.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise HTTPException(status_code=400, detail="水印图片文件内容与扩展名不符")
+            if ext in (".jpg", ".jpeg") and not magic.startswith(b"\xff\xd8"):
+                raise HTTPException(status_code=400, detail="水印图片文件内容与扩展名不符")
+            wm_path = save_upload_file(
+                wm_image,
+                safe_join(task_dir, f"wm_image{ext}"),
+                WM_IMAGE_MAX_SIZE,
+                (".png", ".jpg", ".jpeg"),
+            )
+            with open(wm_path, "rb") as fh:
+                image_bytes = fh.read()
             # 魔数校验（与 file_security.validate_file_header 同语义，作用于已读 bytes）
             magic = image_bytes[:16]
             if ext == ".png" and not magic.startswith(b"\x89PNG\r\n\x1a\n"):

@@ -24,8 +24,11 @@ def build_searchable_pdf(image_paths, ocr_results, output_path):
             if not text:
                 continue
             # bbox: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]（图像像素坐标）
-            x = bbox[0][0] if bbox and len(bbox) > 0 else 0
-            y = bbox[0][1] if bbox and len(bbox) > 0 else 0
+            # 审计 #10：bbox 可能是 ndarray，`if bbox` 真值判断会抛
+            # "truth value of an array is ambiguous"，改用显式 None 判断
+            has_bbox = bbox is not None and len(bbox) > 0
+            x = bbox[0][0] if has_bbox else 0
+            y = bbox[0][1] if has_bbox else 0
             try:
                 page.insert_text(
                     (x, y + 10),

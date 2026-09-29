@@ -91,10 +91,10 @@ class IDPhotoRenderer:
         font = _load_font(font_size_px)
         text = watermark.text
         rgb = _hex_to_rgb(watermark.color)
-        # Pre-blend the watermark color against a white background so that
-        # we can draw with alpha=255 and avoid the "double-blending" issue
-        # that makes low-opacity watermarks invisible on white paper.
-        blended = tuple(int(c * (1 - watermark.opacity) + 255 * watermark.opacity) for c in rgb)
+        # 审计 #26：透明度走标准 alpha 合成（α=1 最实），与前端 Konva 预览语义一致。
+        # 旧实现把颜色向白预混（c*(1-α)+255*α），方向与预览相反：调"更实"反而更淡。
+        # alpha 放进 tile 的 alpha 通道，paste 时按 result = c*α + bg*(1-α) 合成。
+        alpha = max(0, min(255, int(round(watermark.opacity * 255))))
 
         bbox = font.getbbox(text)
         text_w = max(1, bbox[2] - bbox[0])
@@ -108,7 +108,7 @@ class IDPhotoRenderer:
             (tile_size // 2 - text_w // 2, tile_size // 2 - text_h // 2),
             text,
             font=font,
-            fill=(*blended, 255),
+            fill=(*rgb, alpha),
         )
         tile = tile.rotate(45, expand=False, resample=Image.BICUBIC)
 
@@ -127,8 +127,9 @@ class IDPhotoRenderer:
         if (not raw_src) and img.src_ref and source_images:
             raw_src = source_images.get(img.src_ref)
         if not raw_src:
-            logger.warning(f"Image {img.id} has neither src nor resolvable src_ref, skipped")
-            return
+            # 审计 #27：src_ref 指向不存在的键时静默跳过，会让用户拿到缺图成品无
+            # 感知——改为显式报错（路由映射 400 引导重新排版生成）
+            raise ValueError(f"图片 {img.id} 缺少图片数据（src/src_ref 均无效），请重新排版后再生成")
         try:
             data = _parse_base64(raw_src)
             _validate_image_header(data)

@@ -59,8 +59,12 @@ def scan_to_pdf(file: UploadFile = File(...)):
         file, safe_join(task_dir, f"input{suffix}"), MAX_SIZE, OCR_EXTS
     )
 
-    # 预检
-    ok, msg, has_text = precheck(input_path, is_image)
+    # 预检（审计 #12：precheck 自身异常兜底，避免逃逸成裸 500）
+    try:
+        ok, msg, has_text = precheck(input_path, is_image)
+    except Exception as e:
+        logger.error(f"OCR precheck failed for task {task_id}: {e}")
+        raise HTTPException(status_code=422, detail="文件预检失败，请重试或更换文件")
     if not ok:
         raise HTTPException(status_code=422, detail=msg)
     if has_text:

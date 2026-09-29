@@ -4,6 +4,7 @@
 """
 import csv
 import io
+import re
 from datetime import datetime
 from typing import List, Optional
 
@@ -34,9 +35,16 @@ MONEY_FORMAT = "0.00"
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
+# 审计 #15：openpyxl 拒绝的控制字符（\x00/\x0b 等 → IllegalCharacterError 裸 500），
+# 导出前统一剥离；剥离后再做公式前缀检查
+_INVALID_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 def _sanitize_cell(value):
-    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
-        return "'" + value
+    if isinstance(value, str):
+        value = _INVALID_CONTROL_CHARS.sub("", value)
+        if value.startswith(_FORMULA_PREFIXES):
+            return "'" + value
     return value
 
 

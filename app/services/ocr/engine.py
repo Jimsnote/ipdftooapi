@@ -64,8 +64,16 @@ def ocr_image(img_path: str):
     j = getattr(r, "json", None)
     data = json.loads(j) if isinstance(j, str) else (j if isinstance(j, dict) else {})
     texts, polys = _extract_texts_polys(data)
+    # 审计 #10：PaddleOCR 3.x 返回 numpy ndarray，`if polys` / `texts or []`
+    # 会因 "truth value of an array is ambiguous" 抛 ValueError，统一归一化为 list
+    if texts is not None and hasattr(texts, "tolist"):
+        texts = texts.tolist()
+    if polys is not None and hasattr(polys, "tolist"):
+        polys = polys.tolist()
     out = []
     for i, t in enumerate(texts or []):
-        bbox = polys[i] if polys and i < len(polys) else None
+        bbox = polys[i] if (polys is not None and i < len(polys)) else None
+        if bbox is not None and hasattr(bbox, "tolist"):
+            bbox = bbox.tolist()
         out.append((bbox, t))
     return out

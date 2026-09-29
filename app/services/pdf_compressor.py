@@ -137,8 +137,16 @@ class PDFCompressor:
         with open(output_path, "wb") as f:
             writer.write(f)
 
-        logger.info(
-            f"Fallback compressed PDF: {os.path.getsize(self.file_path)} -> "
-            f"{os.path.getsize(output_path)} bytes"
-        )
+        # 审计 #19：fallback 产出 ≥ 输入时回传原文件内容，路由按实际体积给出
+        # 如实的结果文案（reduction=0），不再越压越大还报"压缩完成"
+        in_size = os.path.getsize(self.file_path)
+        out_size = os.path.getsize(output_path)
+        if out_size >= in_size:
+            logger.info(
+                f"Fallback compression ineffective ({in_size} -> {out_size} bytes), "
+                "returning original file content"
+            )
+            shutil.copyfile(self.file_path, output_path)
+        else:
+            logger.info(f"Fallback compressed PDF: {in_size} -> {out_size} bytes")
         return output_path
