@@ -315,6 +315,6 @@ def test_convert_ofd_batch_rejects_malicious_ofd(tmp_path):
 
     bad = _write(tmp_path, "bad.ofd", _zip_bytes({"../evil.txt": b"x", "OFD.xml": b"<of:doc />"}))
     with pytest.raises(HTTPException) as ei:
-        convert_ofd_batch(str(tmp_path), [bad], ["bad.ofd"])
+        convert_ofd_batch(str(tmp_path), [(0, bad)], ["bad.ofd"])
     assert ei.value.status_code == 400
     assert "不是有效的 OFD" in ei.value.detail

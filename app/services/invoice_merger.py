@@ -24,6 +24,10 @@ PASTE_GRID = {
 }
 PASTE_DEFAULT_BINDING_MM = 30.0  # 左侧装订线默认宽度（财务凭证惯例）
 
+# 审计 #3e：全部输出页以 300dpi RGB 常驻内存（26MB/页），页数无上限时
+# 大批次会逼近/打爆 2GB 服务器内存。总页数超过上限直接拒绝。
+MAX_MERGE_PAGES = 100
+
 
 @dataclass
 class InvoiceInfo:
@@ -107,9 +111,21 @@ class InvoiceMerger:
             cols, rows, rotate_deg = PASTE_GRID[per_page]
             w_px, h_px = A4_LANDSCAPE_PX_300
         else:
-            cols, rows = grid_map.get(per_page, (2, 2))
+            # 审计 #4：不再静默兜底 2×2（旧兜底会按 per_page 切片把第 5 张起
+            # 贴出画布外被 PIL 裁掉，产物丢票却报成功），非法档位显式报错
+            if per_page not in grid_map:
+                raise ValueError("每页张数仅支持 1、2、4、6、9")
+            cols, rows = grid_map[per_page]
             rotate_deg = 0
             w_px, h_px = A4_PX_300
+
+        # 审计 #3e：总页数上限（analyze 已记录每文件页数，无需再开文档）
+        total_invoice_pages = sum(info.page_count for info in self._infos)
+        if total_invoice_pages > MAX_MERGE_PAGES:
+            raise ValueError(
+                f"发票总页数超过上限（{total_invoice_pages} 页 > {MAX_MERGE_PAGES} 页），"
+                "请分批合并后再用 PDF 合并工具拼接"
+            )
 
         margin_px = int(margin_mm / 25.4 * 300)
         binding_px = int(binding_mm / 25.4 * 300)
@@ -156,6 +172,7 @@ class InvoiceMerger:
                 mat = fitz.Matrix(300 / 72, 300 / 72)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                pix = None  # 及时释放像素缓冲（26MB/页级别）
 
                 # paste_sheet 的 2 张档：发票旋转 90° 竖贴（内容正向可读）
                 if rotate_deg:

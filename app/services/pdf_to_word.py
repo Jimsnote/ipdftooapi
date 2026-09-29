@@ -16,7 +16,9 @@ class PDFToWordConverter:
         Args:
             input_path: Path to the input PDF file.
             output_path: Path for the output .docx file.
-            pages: Page range string, e.g. "0,2,5" or "0-3" (0-based). None means all pages.
+            pages: Page range string, 1-based, e.g. "1,3,5" or "1-4"（与全站
+                split/to-jpg/to-markdown 等端点的 1 基语义一致）。
+                None means all pages.
 
         Returns:
             dict with page_count info.
@@ -47,9 +49,12 @@ class PDFToWordConverter:
 
     @staticmethod
     def _parse_pages(pages: str, total_pages: int) -> list:
-        """Parse page string like '0,2,5' or '0-3' (0-based) into a clamped, deduplicated list.
+        """Parse page string like '1,3,5' or '1-4' (1-based) into a clamped,
+        deduplicated 0-based list for pdf2docx.
 
-        先夹到 [0, total_pages-1] 再展开：防超大区间把内存撑爆（DoS）。
+        审计 #14：对外语义改为 1 基（此前是 0 基，与全站 split/to-jpg/to-markdown
+        相反，pages="1" 会静默转第 2 页）。先夹到 [1, total_pages] 再展开防 DoS，
+        最终换算回 pdf2docx 需要的 0 基列表。
         """
         result = set()
         for part in pages.split(","):
@@ -62,13 +67,14 @@ class PDFToWordConverter:
                 end_num = int(end)
                 if start_num > end_num:
                     raise ValueError(f"页码区间无效：{part}")
-                # 夹取后再迭代，防 "0-99999999" 这类超大区间
-                result.update(range(max(0, start_num), min(end_num, total_pages - 1) + 1))
+                # 夹取后再迭代，防 "1-99999999" 这类超大区间
+                result.update(range(max(1, start_num), min(end_num, total_pages) + 1))
             else:
                 p = int(part)
-                if 0 <= p < total_pages:
+                if 1 <= p <= total_pages:
                     result.add(p)
-        result = sorted(result)
+        # 换算为 pdf2docx 的 0 基页号
+        result = sorted(p - 1 for p in result)
         if not result:
             raise ValueError("没有有效的页码范围")
         return result

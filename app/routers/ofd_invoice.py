@@ -29,6 +29,9 @@ MAX_OFD_FILES = 50
 MAX_OFD_SIZE = 10 * 1024 * 1024  # 10MB / 单张，与 invoice-merge 对齐（评审 P2/P5）
 OFD_EXTENSIONS = (".ofd",)
 
+# 审计 #4：与统一端点对齐的 per_page 白名单
+VALID_PER_PAGE = {1, 2, 4, 6, 9}
+
 
 @router.post("/analyze", summary="上传 OFD 发票并转换为 PDF，返回尺寸信息")
 def analyze_ofd_invoices(files: List[UploadFile] = File(...)):
@@ -51,7 +54,10 @@ def analyze_ofd_invoices(files: List[UploadFile] = File(...)):
 
     with OFD_INVOICE_LOCK:
         try:
-            pdf_paths = convert_ofd_batch(task_dir, saved_paths, original_names)
+            # 全新独立批次：全局序号 = 0..N-1（产物 invoice_001..NNN.pdf）
+            pdf_paths = convert_ofd_batch(
+                task_dir, list(enumerate(saved_paths)), original_names
+            )
             merger = InvoiceMerger()
             infos = merger.analyze(pdf_paths)
 
@@ -88,6 +94,12 @@ def merge_ofd_invoices(
     task_dir = get_task_dir(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
+
+    if per_page not in VALID_PER_PAGE:
+        raise HTTPException(
+            status_code=400,
+            detail="每页张数仅支持 1、2、4、6、9",
+        )
 
     # merge 收集 task 目录下所有 .pdf（与 invoice 路由一致）
     pdf_paths = [

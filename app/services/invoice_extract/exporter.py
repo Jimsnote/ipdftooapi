@@ -29,6 +29,16 @@ COLUMNS = [
 
 MONEY_FORMAT = "0.00"
 
+# 审计 #5：公式注入防护。以这些前缀开头的字符串在 Excel/WPS 里会被当公式
+# 执行（WEBSERVICE 外泄 / HYPERLINK 钓鱼），导出前一律前置单引号强制按文本处理
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _sanitize_cell(value):
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
 
 def _cell(row: ExportRowRequest, key: str):
     if key == "warnings":
@@ -57,7 +67,12 @@ def export_csv(rows: List[ExportRowRequest]) -> bytes:
     writer = csv.writer(buf)
     writer.writerow([h for h, _, _ in COLUMNS])
     for row in rows:
-        writer.writerow([("" if _cell(row, k) is None else _cell(row, k)) for _, k, _ in COLUMNS])
+        writer.writerow(
+            [
+                ("" if _cell(row, k) is None else _sanitize_cell(_cell(row, k)))
+                for _, k, _ in COLUMNS
+            ]
+        )
     return b"\xef\xbb\xbf" + buf.getvalue().encode("utf-8")
 
 
@@ -91,12 +106,12 @@ def export_xlsx(rows: List[ExportRowRequest]) -> bytes:
                     cell.value = num
                     cell.number_format = MONEY_FORMAT
                 else:
-                    cell.value = str(value)
+                    cell.value = _sanitize_cell(str(value))
             elif key == "item_count":
                 num = _as_number(value)
-                cell.value = int(num) if num is not None else str(value)
+                cell.value = int(num) if num is not None else _sanitize_cell(str(value))
             else:
-                cell.value = str(value)
+                cell.value = _sanitize_cell(str(value))
 
     widths = [24, 24, 24, 12, 30, 22, 30, 22, 14, 12, 14, 10, 32, 32]
     for col, w in enumerate(widths, start=1):

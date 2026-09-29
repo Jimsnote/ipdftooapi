@@ -16,6 +16,7 @@ from app.core.file_security import (
 from app.core.logger import get_logger
 from app.models.schemas import TaskResponse
 from app.services.ocr.precheck import precheck, MAX_SIZE
+from app.services.render_budget import ensure_page_pixel_budget
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -35,9 +36,14 @@ def _pdf_to_images(pdf_path: str, task_dir: str):
     doc = fitz.open(pdf_path)
     paths = []
     for i, page in enumerate(doc):
+        # 审计 #3d：渲染前像素预算（10000pt 页 @200dpi ≈ 2.3GB pixmap）
+        ensure_page_pixel_budget(
+            page.rect.width, page.rect.height, 200, what=f"第 {i + 1} 页"
+        )
         pix = page.get_pixmap(dpi=200)
         p = safe_join(task_dir, f"page_{i}.png")
         pix.save(p)
+        pix = None
         paths.append(p)
     doc.close()
     return paths
@@ -95,6 +101,9 @@ def scan_to_pdf(file: UploadFile = File(...)):
         )
     except HTTPException:
         raise
+    except ValueError as e:
+        # 页面尺寸超限等用户输入类错误（审计 #3d），给 422 而非 500
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         logger.error(f"scan-to-pdf task {task_id} failed: {e}")
         raise HTTPException(status_code=500, detail="OCR 处理失败，请重试或更换文件")

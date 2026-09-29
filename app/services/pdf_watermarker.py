@@ -17,12 +17,17 @@ import fitz
 from PIL import Image
 
 from app.core.logger import get_logger
+from app.services.render_budget import ensure_image_pixel_limit
 
 logger = get_logger(__name__)
 
 # 与 coolpdf 对齐的取值范围：过淡看不见、过浓遮内容
 MIN_OPACITY = 0.05
 MAX_OPACITY = 0.5
+
+# 审计 #2：tile 锚点总数上限。超大页面（如 20 万 pt）按固定步长铺锚点可达
+# 百万级 insert_text，单请求挂死 worker。超限直接 400 引导改用居中布局。
+MAX_TILE_ANCHORS = 5000
 
 TEXT_COLORS = {
     "gray": (0.5, 0.5, 0.5),
@@ -58,7 +63,10 @@ def _prepare_image_bytes(image_bytes: bytes, opacity: float, rotation_deg: float
     旋转也在 PIL 内完成（insert_image 只支持 90° 倍数、无 morph）：
     expand=True 让画布扩到旋转后的 bounding box，透明背景不遮内容。
     """
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    img = Image.open(io.BytesIO(image_bytes))
+    # 审计 #3c：水印图片同样可能是解压炸弹（10MB PNG 可声明数亿像素）
+    ensure_image_pixel_limit(img.width, img.height, what="水印图片")
+    img = img.convert("RGBA")
     alpha = img.getchannel("A").point(lambda a: int(a * _clamp_opacity(opacity)))
     img.putalpha(alpha)
     if rotation_deg % 360 != 0:
@@ -224,6 +232,15 @@ class PDFWatermarker:
 
         step_x = max(stamp_w * 2.0, 120.0)
         step_y = max(stamp_h * 4.0, 120.0)
+        # 审计 #2：先估算锚点总数，超上限直接拒绝（fail-closed），
+        # 避免百万级 insert_text 把 worker 挂死
+        cols = int((prect.width + stamp_w) // step_x) + 1
+        rows = int((prect.height + stamp_h) // step_y) + 1
+        if cols * rows > MAX_TILE_ANCHORS:
+            raise ValueError(
+                "页面尺寸过大，暂不支持平铺水印（可改用「居中单个」布局，"
+                "或先缩小页面尺寸后重试）"
+            )
         points: List[Tuple[float, float]] = []
         y = 0.0
         row = 0

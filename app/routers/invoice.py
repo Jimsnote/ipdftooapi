@@ -21,6 +21,9 @@ MAX_INVOICE_SIZE = 10 * 1024 * 1024  # 10MB per file
 PDF_EXTENSIONS = (".pdf",)
 OFD_EXTENSIONS = (".ofd",)
 
+# 审计 #4：per_page 白名单（service 层兜底之前路由先拦截，非法值一律 400）
+VALID_PER_PAGE = {1, 2, 4, 6, 9}
+
 
 def raise_processing_error(error: Exception):
     if isinstance(error, HTTPException):
@@ -74,16 +77,15 @@ async def analyze_invoices(
         original_names.append(f.filename or f"invoice_{index + 1:03d}.pdf")
 
     # OFD 批量转换（fail-fast；锁内防 2GB 服务器 OOM）。
-    # start_index 用第一个 OFD 的全局序号，产物直接命名为 invoice_NNN.pdf
-    #（NNN = 上传顺序号），与 PDF 直存命名空间连续对齐。
+    # 产物直接命名为 invoice_NNN.pdf（NNN = 该 OFD 的全局上传序号+1），
+    # 与 PDF 直存命名空间对齐——审计 #1 修复：连续编号在混合序列下会覆盖直存 PDF。
     if ofd_paths:
         try:
             with OFD_INVOICE_LOCK:
                 convert_ofd_batch(
                     task_dir,
-                    [p for _, p in ofd_paths],
+                    ofd_paths,
                     [original_names[i] for i, _ in ofd_paths],
-                    start_index=ofd_paths[0][0] + 1,
                 )
         except HTTPException:
             raise
@@ -94,6 +96,16 @@ async def analyze_invoices(
             saved_paths[idx] = safe_join(task_dir, f"invoice_{idx + 1:03d}.pdf")
 
     pdf_paths = [p for p in saved_paths if p]
+
+    # 审计 #1 加固：任一产物缺失立即失败，绝不让 analyze 阶段 FileNotFoundError
+    # 变成 500（静默覆盖/漏转换在此处兜底暴露）
+    missing = [p for p in pdf_paths if not os.path.exists(p)]
+    if missing:
+        logger.error(f"Invoice analyze task {task_id}: missing converted files: {missing}")
+        raise HTTPException(
+            status_code=500,
+            detail="发票转换结果异常，请重新上传后再试",
+        )
 
     try:
         merger = InvoiceMerger()
@@ -131,6 +143,12 @@ async def merge_invoices(
     task_dir = get_task_dir(TEMP_DIR, task_id)
     if not os.path.exists(task_dir):
         raise HTTPException(status_code=404, detail="任务不存在或已过期，请重新上传")
+
+    if per_page not in VALID_PER_PAGE:
+        raise HTTPException(
+            status_code=400,
+            detail="每页张数仅支持 1、2、4、6、9",
+        )
 
     # 收集任务目录内的发票 PDF（invoice_NNN.pdf；input_*.ofd 是转换源，不参与合并）。
     # sorted() 保证缺省顺序 = 上传顺序（os.listdir 在 ext4 上不保证顺序，大批次可能乱序）

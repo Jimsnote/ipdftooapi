@@ -4,6 +4,7 @@ from typing import List, Literal
 import fitz  # PyMuPDF
 from PIL import Image
 from app.core.logger import get_logger
+from app.services.render_budget import ensure_page_pixel_budget
 
 logger = get_logger(__name__)
 
@@ -79,6 +80,10 @@ class PDFToImageConverter:
 
         for idx in page_indices:
             page = doc.load_page(idx)
+            # 审计 #3a：渲染前像素预算（超大 MediaBox 页会一次性分配数 GB pixmap）
+            ensure_page_pixel_budget(
+                page.rect.width, page.rect.height, dpi, what=f"第 {idx + 1} 页"
+            )
             pix = page.get_pixmap(matrix=mat)
 
             # Convert to PIL for JPEG quality control

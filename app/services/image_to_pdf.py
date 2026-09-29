@@ -2,12 +2,17 @@ import os
 from typing import List, Literal
 from PIL import Image, ImageOps
 from app.core.logger import get_logger
+from app.services.render_budget import ensure_image_pixel_limit
 
 logger = get_logger(__name__)
 
 # A4 dimensions in pixels at 150 DPI
 A4_PORTRAIT = (1240, 1754)   # 210mm x 297mm @ 150 DPI
 A4_LANDSCAPE = (1754, 1240)  # 297mm x 210mm @ 150 DPI
+
+# 审计 #3b：fill 分支 resize 目标边上限（极端长宽比图片如 1×50000 会把
+# 另一边撑到 6200 万像素直接 MemoryError，fail-closed 拒绝）
+MAX_FILL_SIDE_PX = 10000
 
 
 class ImageToPDFConverter:
@@ -46,6 +51,8 @@ class ImageToPDFConverter:
         pil_images = []
         for path in image_paths:
             img = Image.open(path)
+            # 审计 #3c：解压炸弹拦截（几百 KB PNG 可声明数亿像素），在 decode 前拒绝
+            ensure_image_pixel_limit(img.width, img.height)
             # 应用 EXIF orientation：手机横拍/竖拍的照片像素不旋转、方向存在 EXIF 标记里，
             # 不转正会导致 PDF 里图片侧倒（与浏览器/相册里看到的方向不一致）
             img = ImageOps.exif_transpose(img)
@@ -79,6 +86,10 @@ class ImageToPDFConverter:
                     # Image is wider, scale to match height then crop width
                     new_h = page_size[1]
                     new_w = int(new_h * img_ratio)
+                    if new_w > MAX_FILL_SIDE_PX:
+                        raise ValueError(
+                            "图片长宽比过大，无法铺满整页排版，请裁剪图片后重试"
+                        )
                     img = img.resize((new_w, new_h), Image.LANCZOS)
                     left = (new_w - page_size[0]) // 2
                     img = img.crop((left, 0, left + page_size[0], page_size[1]))
@@ -86,6 +97,10 @@ class ImageToPDFConverter:
                     # Image is taller, scale to match width then crop height
                     new_w = page_size[0]
                     new_h = int(new_w / img_ratio)
+                    if new_h > MAX_FILL_SIDE_PX:
+                        raise ValueError(
+                            "图片长宽比过大，无法铺满整页排版，请裁剪图片后重试"
+                        )
                     img = img.resize((new_w, new_h), Image.LANCZOS)
                     top = (new_h - page_size[1]) // 2
                     img = img.crop((0, top, page_size[0], top + page_size[1]))

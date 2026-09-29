@@ -6,6 +6,10 @@ from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
+# 审计 #7：ranges 模式护栏（实测 1MB value 600s 内写出 25 万+ 文件耗尽 inode）
+MAX_RANGE_PARTS = 200        # 最多区间数
+MAX_RANGE_VALUE_LEN = 4096   # value 字符串长度上限
+
 
 class PDFSplitter:
     def __init__(self, file_path: str):
@@ -46,20 +50,33 @@ class PDFSplitter:
 
     def _split_ranges(self, ranges_str: str, output_dir: str) -> List[str]:
         """Split by page ranges like '1-3,5-10'."""
+        # 审计 #7：区间数/长度护栏，超限 400（此前无上限可单请求写 25 万+ 文件）
+        if len(ranges_str) > MAX_RANGE_VALUE_LEN:
+            raise ValueError("拆分区间内容过长（最多 4096 字符），请精简后重试")
         output_paths = []
-        parts = [p.strip() for p in ranges_str.split(",")]
+        parts = [p.strip() for p in ranges_str.split(",") if p.strip()]
+        if len(parts) > MAX_RANGE_PARTS:
+            raise ValueError(
+                f"拆分区间过多（{len(parts)} 个 > 上限 {MAX_RANGE_PARTS} 个），请减少区间后重试"
+            )
 
         for idx, part in enumerate(parts):
             if "-" in part:
                 start, end = part.split("-")
-                start_num = int(start)
-                end_num = int(end)
+                try:
+                    start_num = int(start)
+                    end_num = int(end)
+                except ValueError:
+                    raise ValueError(f"页码区间格式无效：{part}")
                 if start_num > end_num:
                     raise ValueError(f"页码区间无效：{part}")
                 start_page = max(0, start_num - 1)
                 end_page = min(self.total_pages, end_num)
             else:
-                start_num = int(part)
+                try:
+                    start_num = int(part)
+                except ValueError:
+                    raise ValueError(f"页码格式无效：{part}")
                 start_page = start_num - 1
                 end_page = start_page + 1
 

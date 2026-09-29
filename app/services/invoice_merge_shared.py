@@ -4,14 +4,15 @@
 - 把 ofd_invoice.py 的 _normalize_pdf / _convert_and_normalize / _cleanup_intermediate
   / 全局锁提取为进程级单例，统一端点（invoice.py）与旧端点（ofd_invoice.py）共用。
 - 对外仅两个入口：
-  * convert_ofd_batch(task_dir, ofd_paths, original_names) —— fail-fast 整批转换
+  * convert_ofd_batch(task_dir, ofd_items, original_names) —— fail-fast 整批转换
+    （ofd_items = [(全局 0 基序号, 路径)]，产物按全局序号编号防覆盖，审计 #1）
   * OFD_INVOICE_LOCK —— 进程级锁（限并发=1，防 2GB 服务器 OOM）
 - 归一化后处理（原设计 §2.2 步骤 3.5）：easyofd 转出 PDF MediaBox 放大 25/9，
   归一到 ~595pt 宽（矢量保真），渲染内存峰值 ~95MB/页 → ~12MB/页。
 """
 import os
 import threading
-from typing import List
+from typing import List, Tuple
 
 from fastapi import HTTPException
 
@@ -32,9 +33,8 @@ OFD_INVOICE_LOCK = threading.Lock()
 
 def convert_ofd_batch(
     task_dir: str,
-    ofd_paths: List[str],
+    ofd_items: List[Tuple[int, str]],
     original_names: List[str],
-    start_index: int = 1,
 ) -> List[str]:
     """逐个 OFD → PDF → 归一化（fail-fast）。
 
@@ -42,19 +42,20 @@ def convert_ofd_batch(
     并清理已生成的中间文件避免脏数据残留。
     返回转换后的 .pdf 路径列表（invoice_NNN.pdf）。
 
-    start_index：产物序号基准。独立批次（旧 ofd-invoice 端点）传 1（默认），
-    混合批次（统一 invoice 端点）传该 OFD 在整批上传里的全局序号，
-    保证与 PDF 直存的 invoice_NNN.pdf 命名空间对齐、序号连续不冲突。
+    ofd_items：[(全局 0 基序号, OFD 路径)]。产物命名 invoice_{序号+1:03d}.pdf
+    直接沿用该 OFD 在整批上传里的全局序号（审计 #1 修复：旧版用
+    start_index + 子列表下标连续编号，混合序列 [OFD, PDF, OFD] 时第二个
+    OFD 产物会覆盖 PDF 直存的 invoice_002.pdf——必须按全局序号编号）。
     """
     converter = OFDConverter()
     pdf_paths: List[str] = []
-    for i, ofd_path in enumerate(ofd_paths):
-        idx = start_index + i
+    for item_index, (global_idx, ofd_path) in enumerate(ofd_items):
+        idx = global_idx + 1
         raw_pdf = os.path.join(task_dir, f"invoice_{idx:03d}_raw.pdf")
         # zip 预扫描（对抗审查加固）：与 /ofd/view 同一校验，拦截 zip bomb
         # （含伪造中央目录变体）与加密文件——本函数是统一/旧两个发票合并端点
         # 的 OFD 唯一转换入口，单点覆盖。
-        name = original_names[i] if i < len(original_names) else f"第 {idx} 个文件"
+        name = original_names[item_index] if item_index < len(original_names) else f"第 {idx} 个文件"
         try:
             validate_ofd_zip(ofd_path)
         except OfdEncryptedError:

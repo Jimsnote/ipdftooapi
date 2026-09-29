@@ -56,13 +56,19 @@ def _strip_label(text: str) -> str:
     return _LABEL_PREFIX_RE.sub("", text).strip()
 
 
-def _collect_spans(doc: "fitz.Document") -> List[Tuple[float, float, float, float, str]]:
-    """收集全部页面的文本 span：返回 [(x0, y0, x1, y1, text)]（绝对 pt 坐标）。"""
-    spans: List[Tuple[float, float, float, float, str]] = []
+def _collect_spans(doc: "fitz.Document") -> List[List[Tuple[float, float, float, float, str]]]:
+    """按页收集文本 span：返回 [第 N 页的 [(x0, y0, x1, y1, text)]]（绝对 pt 坐标）。
+
+    审计 #6 修复：旧版把所有页的 span 无页标混入同一坐标池，多页 PDF 会
+    产出张冠李戴的台账记录（号码取 A 页、备注混两页、合计跨页配对）。
+    现在每页独立成池，后续分区取值全部限定在单页内。
+    """
+    pages: List[List[Tuple[float, float, float, float, str]]] = []
     for page in doc:
         pw = page.rect.width
         scale = 595.3 / pw if pw > 0 else 1.0  # 容错非标准宽度页面
         raw = page.get_text("dict")
+        page_spans: List[Tuple[float, float, float, float, str]] = []
         for block in raw.get("blocks", []):
             for line in block.get("lines", []):
                 for sp in line.get("spans", []):
@@ -70,8 +76,11 @@ def _collect_spans(doc: "fitz.Document") -> List[Tuple[float, float, float, floa
                     if not text:
                         continue
                     x0, y0, x1, y1 = sp["bbox"]
-                    spans.append((x0 * scale, y0 * scale, x1 * scale, y1 * scale, text))
-    return spans
+                    page_spans.append(
+                        (x0 * scale, y0 * scale, x1 * scale, y1 * scale, text)
+                    )
+        pages.append(page_spans)
+    return pages
 
 
 def _in_band(y0: float, y1: float, band: Tuple[float, float]) -> bool:
@@ -86,7 +95,14 @@ def _pick(spans, band, pred=None):
 
 
 def extract_pdf_bytes(data: bytes, source_file: str) -> InvoiceRecord:
-    """字节流入口（analyze 阶段全程不落盘）。"""
+    """字节流入口（analyze 阶段全程不落盘）。
+
+    审计 #6：按页独立提取。
+    - 恰好一页命中版式 → 返回该页记录（多页文件附加人工核对提示）；
+    - 多页都命中（一个文件多张发票）→ 整体拒绝，引导先用「PDF 分割」拆页；
+    - 全部页都取不到 → 抛原"未定位关键字段"错误。
+    宁失败不错账：绝不再把不同页的字段拼进同一条记录。
+    """
     try:
         doc = fitz.open(stream=data, filetype="pdf")
     except Exception as e:  # noqa: BLE001
@@ -97,8 +113,40 @@ def extract_pdf_bytes(data: bytes, source_file: str) -> InvoiceRecord:
             raise InvoiceExtractError(
                 "未检测到文字层——这是扫描件/图片型 PDF。请先通过「OCR 工具」转为可搜索 PDF 后重试"
             )
-        spans = _collect_spans(doc)
-        return _extract_from_spans(spans, full_text, source_file)
+        spans_by_page = _collect_spans(doc)
+        page_texts = [page.get_text("text") for page in doc]
+
+        candidates: List[Tuple[int, InvoiceRecord]] = []
+        first_error: Optional[InvoiceExtractError] = None
+        for page_no, (spans, page_text) in enumerate(
+            zip(spans_by_page, page_texts), start=1
+        ):
+            try:
+                rec = _extract_from_spans(spans, page_text, source_file)
+            except InvoiceExtractError as e:
+                if first_error is None:
+                    first_error = e
+                continue
+            candidates.append((page_no, rec))
+
+        if not candidates:
+            raise first_error or InvoiceExtractError(
+                "未能从该 PDF 定位数电票关键字段——可能不是数电票标准横版版式，暂不支持"
+            )
+        if len(candidates) > 1:
+            pages_hit = "、".join(str(no) for no, _ in candidates)
+            raise InvoiceExtractError(
+                f"该 PDF 第 {pages_hit} 页均为发票版式（一个文件含多张发票），"
+                "请先用「PDF 分割」工具按页拆分后逐张提取，避免台账串页出错"
+            )
+
+        page_no, record = candidates[0]
+        if len(spans_by_page) > 1:
+            record.warnings.append(
+                f"该 PDF 共 {len(spans_by_page)} 页，仅第 {page_no} 页完成提取，"
+                "其余页内容未纳入台账，请人工核对"
+            )
+        return record
     finally:
         doc.close()
 
