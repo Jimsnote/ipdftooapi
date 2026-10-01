@@ -62,8 +62,9 @@ class _OfdText:
 def _load_ofd_stream(data: bytes) -> zipfile.ZipFile:
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
-    except Exception as e:  # noqa: BLE001
-        raise InvoiceExtractError(f"无法打开 OFD（不是有效的 ZIP 包）：{e}") from e
+    except Exception:  # noqa: BLE001
+        # 审计 P3 英文错误族：库层英文异常（"File is not a zip file" 等）不直出
+        raise InvoiceExtractError("无法打开 OFD（不是有效的 ZIP 包），文件可能已损坏")
     names = zf.namelist()
     if not any(n.upper() == "OFD.XML" for n in names):
         raise InvoiceExtractError("包内缺少 OFD.xml——这不是 OFD 版式文件")
@@ -123,7 +124,14 @@ def _collect_text_objects(zf: zipfile.ZipFile) -> _OfdText:
             if _local(el.tag) == "PhysicalBox" and el.text:
                 box = el.text.split()
                 break
-        pw = float(box[2]) if box and len(box) >= 3 else 210.0
+        # 审计 L14：PhysicalBox 非数值时 float() 抛 ValueError，曾落入路由层
+        # "解析失败，请确认文件未损坏"误导文案——转成带真实原因的提取失败
+        try:
+            pw = float(box[2]) if box and len(box) >= 3 else 210.0
+        except (TypeError, ValueError):
+            raise InvoiceExtractError(
+                f"OFD 页面尺寸数据无效（PhysicalBox: {' '.join(box) if box else '缺失'}）"
+            )
         out.page_width_mm = pw
         for t in _find_children(root, "TextObject"):
             tid = t.get("ID")

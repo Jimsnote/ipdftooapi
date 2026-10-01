@@ -272,14 +272,17 @@ def _load_drawparam_colors(input_path: str) -> dict:
 
 
 def _valid_rgb(color) -> tuple:
-    """校验 easyofd 解析出的颜色值为 3 个数值，返回 tuple 或 None。"""
+    """校验 easyofd 解析出的颜色值为 3 个数值，返回 tuple 或 None。
+
+    审计 L12：显式纯黑 (0,0,0) 曾被 `not any(v)` 误判为"缺色"，引用彩色
+    DrawParam 时被错误染色。非空 tuple 本身为真值，(0,0,0) 合法直接返回，
+    None 仅表示"不是有效的三数值颜色"。
+    """
     if not isinstance(color, (list, tuple)) or len(color) < 3:
         return None
     try:
         vals = [float(v) for v in color[:3]]
     except (TypeError, ValueError):
-        return None
-    if not any(v for v in vals):
         return None
     return tuple(max(0, min(255, int(v))) for v in vals)
 

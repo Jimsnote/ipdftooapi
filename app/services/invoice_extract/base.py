@@ -1,5 +1,6 @@
 """发票提取公共工具：清洗、校验、统一异常。"""
 import re
+from datetime import date
 from typing import List, Optional
 
 from app.models.invoice_extract import InvoiceRecord
@@ -51,17 +52,23 @@ def is_amount(raw: Optional[str]) -> bool:
 
 
 def normalize_cn_date(raw: Optional[str]) -> Optional[str]:
-    """2026年08月25日 / 2026-8-25 → 2026-08-25；解析失败返回 None。"""
+    """2026年08月25日 / 2026-8-25 → 2026-08-25；解析失败返回 None。
+
+    审计 L13：正则只保证是数字，不保证月/日合法（2026-13-40 会原样进台账，
+    排序/筛选出错）——补 datetime 合法性校验，非法返回 None（validate_record
+    会因此挂"未能识别开票日期"提示）。
+    """
     if not raw:
         return None
     s = str(raw).strip()
-    m = CN_DATE_RE.match(s)
-    if m:
-        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    m = ISO_DATE_RE.match(s)
-    if m:
-        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    return None
+    m = CN_DATE_RE.match(s) or ISO_DATE_RE.match(s)
+    if not m:
+        return None
+    try:
+        date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+    return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
 
 
 def _to_float(s: Optional[str]) -> Optional[float]:

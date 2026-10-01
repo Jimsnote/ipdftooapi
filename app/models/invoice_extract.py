@@ -7,7 +7,12 @@
 """
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# 审计 #21：单元格长度上限（此前无限制，单行字段可塞 MB 级字符串，
+# 10000 行上限 × 无行长限制 → xlsx 全内存构建 OOM 压力）
+CELL_MAX_LENGTH = 500
+MAX_WARNINGS_PER_ROW = 20
 
 
 class InvoiceRecord(BaseModel):
@@ -43,23 +48,37 @@ class AnalyzeResponse(BaseModel):
 
 
 class ExportRowRequest(BaseModel):
-    """前端表格当前态的一行（允许手动补录/修正后的数据）。"""
+    """前端表格当前态的一行（允许手动补录/修正后的数据）。
 
-    source_file: Optional[str] = None
-    source_format: Optional[str] = None
-    invoice_type: Optional[str] = None
-    invoice_number: Optional[str] = None
-    issue_date: Optional[str] = None
-    buyer_name: Optional[str] = None
-    buyer_tax_id: Optional[str] = None
-    seller_name: Optional[str] = None
-    seller_tax_id: Optional[str] = None
-    amount_without_tax: Optional[str] = None
-    tax_amount: Optional[str] = None
-    total_with_tax: Optional[str] = None
+    审计 #21：字符串字段统一 max_length=500、warnings 条数与单条长度受限，
+    防止单行 MB 级字段把 xlsx 全内存构建撑爆。
+    """
+
+    source_file: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    source_format: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    invoice_type: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    invoice_number: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    issue_date: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    buyer_name: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    buyer_tax_id: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    seller_name: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    seller_tax_id: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    amount_without_tax: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    tax_amount: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    total_with_tax: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
     item_count: Optional[int] = None
-    remark: Optional[str] = None
-    warnings: Optional[List[str]] = None
+    remark: Optional[str] = Field(None, max_length=CELL_MAX_LENGTH)
+    warnings: Optional[List[str]] = Field(
+        None,
+        max_length=MAX_WARNINGS_PER_ROW,
+    )
+
+    @field_validator("warnings")
+    @classmethod
+    def _limit_warning_length(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v and any(len(w) > CELL_MAX_LENGTH for w in v):
+            raise ValueError("单条校验提示过长")
+        return v
 
 
 class ExportRequest(BaseModel):

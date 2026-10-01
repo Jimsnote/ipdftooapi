@@ -10,12 +10,16 @@ BLURRY_VARIANCE_THRESHOLD = 100  # 拉普拉斯方差低于此值视为模糊（
 
 
 def _check_blurriness(file_path: str) -> bool:
-    """拉普拉斯方差检测模糊。返回 True=模糊。失败则返回 False（不阻断）。"""
+    """拉普拉斯方差检测模糊。返回 True=模糊。失败则返回 False（不阻断）。
+
+    审计 L29：cv2.imread 会把整图载入内存（5000 万像素图内存尖峰数百 MB），
+    用 IMREAD_REDUCED_COLOR_2 降采样读取（1/4 像素量），模糊检测是近似指标，
+    降采样不影响判定用途。
+    """
     try:
         import cv2
-        import numpy as np
 
-        img = cv2.imread(file_path)
+        img = cv2.imread(file_path, cv2.IMREAD_REDUCED_COLOR_2)
         if img is None:
             return False
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)

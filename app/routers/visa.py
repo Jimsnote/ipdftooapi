@@ -67,6 +67,10 @@ async def fill_visa(body: VisaFillRequest) -> Response:
         # 完整性自检失败等内部错误：不向客户端泄露细节
         logger.error(f"visa fill internal error: template={body.template}: {e}")
         raise HTTPException(status_code=500, detail=MSG_INTERNAL)
+    except Exception as e:
+        # 审计 L5（后半）：意外异常此前绕过统一日志变裸 500——兜底映射 + 记日志
+        logger.error(f"visa fill unexpected error: template={body.template}: {e!r}")
+        raise HTTPException(status_code=500, detail=MSG_INTERNAL)
 
     # 仅记录非敏感元信息（模板 ID 与字节数），不记录字段值
     logger.info(f"visa fill completed: template={body.template}, {len(out)} bytes")

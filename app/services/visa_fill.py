@@ -505,10 +505,8 @@ def fill_visa_form(template_id: str, values: dict[str, str]) -> bytes:
     if len(values) > 1000:
         raise InvalidSOMPathError("字段数量超限")
 
-    tpl = _get_template(template_id)  # 触发加载 + 白名单缓存
-
-    # 1. 输入校验（先于任何改写）：类型/长度 + 非法字符 + SOM 解析到数据树全路径
-    resolved: dict[str, str] = {}
+    # 审计 L5（前半）：与模板无关的字段校验前置——此前 _get_template 在前，
+    # "超长值 + 未知模板"会先报"暂不支持该表格模板"误导用户
     for som, val in values.items():
         if not isinstance(val, str) or len(val) > MAX_VALUE_LEN:
             raise ValueTooLongError(
@@ -518,8 +516,20 @@ def fill_visa_form(template_id: str, values: dict[str, str]) -> bytes:
             raise InvalidFieldValueError("字段值含不支持的字符（控制/二进制字符）")
         if not isinstance(som, str):
             raise InvalidSOMPathError("包含无效的表单字段路径")
-        val = _translate_checkbutton(som, val, tpl.cb_on_values)
-        resolved[_resolve_som(som, tpl.leaf_paths)] = val
+
+    tpl = _get_template(template_id)  # 触发加载 + 白名单缓存
+
+    # SOM 解析到数据树全路径（需要模板白名单）。
+    # 审计 L6（后半）：多个提交键解析到同一数据树叶子时此前静默覆盖
+    # （注释记载电话按钮 on='0' 可覆盖已选 '1'）——显式拒绝防错填
+    resolved: dict[str, str] = {}
+    for som, val in values.items():
+        path = _resolve_som(som, tpl.leaf_paths)
+        if path in resolved:
+            raise InvalidSOMPathError(
+                "多个字段指向同一表单项，请刷新页面后重新填写"
+            )
+        resolved[path] = _translate_checkbutton(som, val, tpl.cb_on_values)
     orig = tpl.raw
     orig_len = len(orig)
 

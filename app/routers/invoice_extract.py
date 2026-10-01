@@ -133,6 +133,27 @@ def extract_export(payload: ExportRequest):
     if len(payload.rows) > MAX_EXPORT_ROWS:
         raise HTTPException(status_code=400, detail=f"单次最多导出 {MAX_EXPORT_ROWS} 行")
 
+    # 审计 #21：行数×行长总量预算（字段级上限之外的第二道闸，
+    # 防 10000 行 × 500 字符 × 14 列的全内存 xlsx 构建压力）
+    total_chars = sum(
+        len(v)
+        for row in payload.rows
+        for v in (
+            row.source_file, row.source_format, row.invoice_type,
+            row.invoice_number, row.issue_date, row.buyer_name,
+            row.buyer_tax_id, row.seller_name, row.seller_tax_id,
+            row.amount_without_tax, row.tax_amount, row.total_with_tax,
+            row.remark,
+        )
+        if v
+    )
+    total_chars += sum(len(w) for row in payload.rows for w in (row.warnings or []))
+    if total_chars > 20_000_000:
+        raise HTTPException(
+            status_code=400,
+            detail="数据量过大（总字符数超限），请删减行数或缩短内容后重试",
+        )
+
     if fmt == "csv":
         content = export_csv(payload.rows)
         media_type = _CSV_MEDIA

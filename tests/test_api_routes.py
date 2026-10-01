@@ -240,13 +240,14 @@ def test_unlock_happy_path_with_password(client):
     assert dl.content[:4] == b"%PDF"
 
 
-def test_unlock_wrong_password_returns_422(client):
+def test_unlock_wrong_password_returns_400(client):
+    """审计 L1：密码错误与其他端点对齐为 400（此前 422，错误码契约不一致）。"""
     r = client.post(
         "/api/v1/pdf/unlock",
         files={"file": ("locked.pdf", _protected_pdf_bytes("secret123"), "application/pdf")},
         data={"password": "wrong"},
     )
-    assert r.status_code == 422
+    assert r.status_code == 400
     assert "密码" in r.json()["detail"]
 
 

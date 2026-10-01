@@ -2,11 +2,13 @@ import json
 import os
 from typing import List
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from app.models.schemas import TaskResponse
 from app.services.invoice_merger import InvoiceMerger
 from app.services.invoice_merge_shared import OFD_INVOICE_LOCK, convert_ofd_batch
+from app.core.errors import friendly_detail
 from app.core.logger import get_logger
 from app.core.file_security import get_task_dir, make_task_dir, safe_join, save_upload_file
 
@@ -29,7 +31,11 @@ def raise_processing_error(error: Exception):
     if isinstance(error, HTTPException):
         raise error
     if isinstance(error, ValueError):
-        raise HTTPException(status_code=400, detail=str(error))
+        # 审计 P3 英文错误族：业务中文文案原样返回，库层英文给兜底
+        raise HTTPException(
+            status_code=400,
+            detail=friendly_detail(error, "发票处理失败，请检查文件后重试"),
+        )
     # 未知异常不向客户端泄露内部细节，完整信息仅入日志
     logger.error(f"Invoice processing error: {error!r}")
     raise HTTPException(status_code=500, detail="服务器处理失败，请稍后重试")
@@ -49,6 +55,9 @@ async def analyze_invoices(
             status_code=400,
             detail=f"最多上传 {MAX_INVOICE_FILES} 张发票",
         )
+    # 审计 L4：空文件列表此前返回 200 空结果，与 extract-analyze 对齐为 400
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少上传一个发票文件")
 
     task_id, task_dir = make_task_dir(TEMP_DIR)
 
@@ -82,7 +91,10 @@ async def analyze_invoices(
     if ofd_paths:
         try:
             with OFD_INVOICE_LOCK:
-                convert_ofd_batch(
+                # 审计 #17：OFD→PDF 转换秒级重活放线程池（锁跨 await 持有，
+                # acquire/release 都在事件循环线程，语义不变）
+                await run_in_threadpool(
+                    convert_ofd_batch,
                     task_dir,
                     ofd_paths,
                     [original_names[i] for i, _ in ofd_paths],
@@ -109,7 +121,8 @@ async def analyze_invoices(
 
     try:
         merger = InvoiceMerger()
-        infos = merger.analyze(pdf_paths)
+        # 审计 #17：逐文件解析可达秒级，放线程池
+        infos = await run_in_threadpool(merger.analyze, pdf_paths)
 
         return {
             "task_id": task_id,
@@ -187,10 +200,11 @@ async def merge_invoices(
 
     try:
         merger = InvoiceMerger()
-        merger.analyze(pdf_paths)
+        await run_in_threadpool(merger.analyze, pdf_paths)
 
         output_path = safe_join(task_dir, "merged_invoices.pdf")
-        info = merger.merge(
+        info = await run_in_threadpool(
+            merger.merge,
             output_path=output_path,
             per_page=per_page,
             margin=margin if margin in ("narrow", "standard", "wide") else "standard",

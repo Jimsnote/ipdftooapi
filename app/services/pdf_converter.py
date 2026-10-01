@@ -37,6 +37,11 @@ class PDFToMarkdownConverter:
         if pages:
             kwargs["pages"] = self._parse_pages(pages, input_path)
 
+        # 审计 L10：页数用真实文档页数（此前按 Markdown 段落数统计，
+        # 3 页文档报"共 1 页"）
+        with fitz.open(input_path) as doc:
+            doc_total = doc.page_count
+
         # Convert to markdown string
         md_text = pymupdf4llm.to_markdown(input_path, **kwargs)
 
@@ -44,7 +49,7 @@ class PDFToMarkdownConverter:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(md_text)
 
-        page_count = len(md_text.split("\n\n")) if isinstance(md_text, str) else len(md_text)
+        page_count = len(kwargs["pages"]) if pages else doc_total
         char_count = len(md_text) if isinstance(md_text, str) else sum(len(c["text"]) for c in md_text)
 
         logger.info(
@@ -81,14 +86,20 @@ class PDFToMarkdownConverter:
                 continue
             if "-" in part:
                 start, end = part.split("-")
-                start_num = int(start)
-                end_num = int(end)
+                try:
+                    start_num = int(start)
+                    end_num = int(end)
+                except ValueError:
+                    raise ValueError(f"页码格式无效：{part}")
                 if start_num > end_num:
                     raise ValueError(f"页码区间无效：{part}")
                 # 夹取后再迭代，防 "1-99999999" 这类超大区间
                 result.update(range(max(0, start_num - 1), min(end_num, total)))
             else:
-                p = int(part) - 1
+                try:
+                    p = int(part) - 1
+                except ValueError:
+                    raise ValueError(f"页码格式无效：{part}")
                 if 0 <= p < total:
                     result.add(p)
         result = sorted(result)

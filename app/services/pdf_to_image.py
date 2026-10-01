@@ -78,29 +78,39 @@ class PDFToImageConverter:
         output_paths: List[str] = []
         ext = "jpg" if format == "jpg" else "png"
 
-        for idx in page_indices:
-            page = doc.load_page(idx)
-            # 审计 #3a：渲染前像素预算（超大 MediaBox 页会一次性分配数 GB pixmap）
-            ensure_page_pixel_budget(
-                page.rect.width, page.rect.height, dpi, what=f"第 {idx + 1} 页"
-            )
-            pix = page.get_pixmap(matrix=mat)
+        # 审计 L15：渲染中途异常时保证 doc 关闭并清理半成品（此前 doc 泄漏、
+        # page_NNN.jpg 残留会混进下次任务目录）
+        try:
+            for idx in page_indices:
+                page = doc.load_page(idx)
+                # 审计 #3a：渲染前像素预算（超大 MediaBox 页会一次性分配数 GB pixmap）
+                ensure_page_pixel_budget(
+                    page.rect.width, page.rect.height, dpi, what=f"第 {idx + 1} 页"
+                )
+                pix = page.get_pixmap(matrix=mat)
 
-            # Convert to PIL for JPEG quality control
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                # Convert to PIL for JPEG quality control
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-            output_name = f"page_{idx + 1:03d}.{ext}"
-            output_path = os.path.join(output_dir, output_name)
+                output_name = f"page_{idx + 1:03d}.{ext}"
+                output_path = os.path.join(output_dir, output_name)
 
-            if format == "jpg":
-                img.save(output_path, "JPEG", quality=90, optimize=True)
-            else:
-                img.save(output_path, "PNG", optimize=True)
+                if format == "jpg":
+                    img.save(output_path, "JPEG", quality=90, optimize=True)
+                else:
+                    img.save(output_path, "PNG", optimize=True)
 
-            output_paths.append(output_path)
-            logger.debug(f"Rendered page {idx + 1} -> {output_path}")
-
-        doc.close()
+                output_paths.append(output_path)
+                logger.debug(f"Rendered page {idx + 1} -> {output_path}")
+        except Exception:
+            for p in output_paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            raise
+        finally:
+            doc.close()
         logger.info(f"PDF to image conversion completed: {len(output_paths)} page(s)")
         return output_paths
 

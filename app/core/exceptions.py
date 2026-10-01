@@ -11,9 +11,10 @@ class PDFProcessingError(HTTPException):
 
 class FileTooLargeError(HTTPException):
     def __init__(self, max_size: int):
+        # 审计 P3 英文错误族：413 文案中文化（此前直出英文，全部上传端点共用）
         super().__init__(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File too large. Maximum allowed size is {max_size} bytes.",
+            detail=f"文件过大，最大支持 {max_size // (1024 * 1024)}MB，请压缩或拆分后重试",
         )
 
 

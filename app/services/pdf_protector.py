@@ -1,6 +1,6 @@
 import os
 from typing import Optional
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
 from pypdf.constants import UserAccessPermissions as UAP
 from app.core.logger import get_logger
 
@@ -41,6 +41,10 @@ class PDFProtector:
         Returns:
             Path to the encrypted PDF file.
         """
+        # 审计 L11：0 页 PDF 加密产出空壳文件，前置拦截
+        if len(PdfReader(self.input_path).pages) == 0:
+            raise ValueError("PDF 没有任何页面，无法加密")
+
         writer = PdfWriter()
         writer.append(self.input_path)
 

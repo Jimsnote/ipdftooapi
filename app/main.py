@@ -55,12 +55,59 @@ def _sanitize_non_finite(value):
     return value
 
 
+# 审计 P3 英文错误族：pydantic 422 详情中文化（此前全英文直出，
+# 如 protect 的 7 个 allow_* 布尔、rotate angle 数值等）
+_VALIDATION_TYPE_MSG = {
+    "missing": "缺少必填参数",
+    "extra_forbidden": "包含不支持的参数",
+    "string_type": "应为文本",
+    "string_too_long": "内容过长",
+    "string_too_short": "内容过短",
+    "bool_type": "应为布尔值（true/false）",
+    "int_type": "应为整数",
+    "int_parsing": "应为整数",
+    "float_type": "应为数字",
+    "float_parsing": "应为数字",
+    "number_type": "应为数字",
+    "greater_than_equal": "数值低于下限",
+    "less_than_equal": "数值超过上限",
+    "greater_than": "数值低于下限",
+    "less_than": "数值超过上限",
+    "finite_number": "数值无效（不接受 NaN/Infinity）",
+    "json_invalid": "请求体不是合法 JSON",
+    "json_type": "请求体格式不正确",
+    "list_type": "应为列表",
+    "dict_type": "应为对象",
+    "value_error": "参数不合法",
+}
+
+
+def _translate_validation_errors(errors: list) -> list:
+    """把 pydantic 错误详情的 msg 翻译为中文（未知类型给通用文案）。"""
+    translated = []
+    for err in errors:
+        if not isinstance(err, dict):
+            translated.append(err)
+            continue
+        item = dict(err)
+        msg = _VALIDATION_TYPE_MSG.get(str(err.get("type")))
+        if msg:
+            item["msg"] = msg
+        translated.append(item)
+    return translated
+
+
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
     # R1：清洗错误详情中的非有限浮点后返回标准 422 JSON，替代会自崩的默认处理器
+    # P3：错误 msg 同步中文化
     return JSONResponse(
         status_code=422,
-        content={"detail": _sanitize_non_finite(jsonable_encoder(exc.errors()))},
+        content={
+            "detail": _translate_validation_errors(
+                _sanitize_non_finite(jsonable_encoder(exc.errors()))
+            )
+        },
     )
 
 

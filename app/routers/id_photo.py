@@ -2,6 +2,7 @@ import os
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
+from app.core.errors import friendly_detail
 from app.core.logger import get_logger
 from app.schemas.id_photo import IDPhotoRenderRequest
 from app.models.schemas import TaskResponse
@@ -24,7 +25,12 @@ async def render_id_photo(payload: IDPhotoRenderRequest):
     try:
         IDPhotoRendererService.render_to_file(payload, output_path)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # 审计 P3 英文错误族：业务中文文案原样返回；库层英文
+        # （"Coordinate 'right' is less than 'left'" 等）给通用兜底
+        raise HTTPException(
+            status_code=400,
+            detail=friendly_detail(e, "图片参数无效，请调整排版设置后重试"),
+        )
     except Exception as e:
         logger.error(f"ID photo render task {task_id} failed: {e}")
         raise HTTPException(status_code=500, detail="渲染失败，请稍后重试")

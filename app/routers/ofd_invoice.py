@@ -37,6 +37,9 @@ VALID_PER_PAGE = {1, 2, 4, 6, 9}
 def analyze_ofd_invoices(files: List[UploadFile] = File(...)):
     if len(files) > MAX_OFD_FILES:
         raise HTTPException(status_code=400, detail=f"最多上传 {MAX_OFD_FILES} 张 OFD 发票")
+    # 审计 L4：空文件列表此前返回 200 空结果，对齐为 400
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少上传一个 OFD 发票文件")
 
     task_id, task_dir = make_task_dir(TEMP_DIR)
 

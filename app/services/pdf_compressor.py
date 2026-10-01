@@ -51,15 +51,19 @@ class PDFCompressor:
 
     def compress(self, output_path: str, level: str = "normal") -> str:
         if level not in self.LEVELS:
-            raise ValueError(f"Unknown compression level: {level}")
+            raise ValueError(f"不支持的压缩级别：{level}（可选：extreme / normal / light）")
 
         # 部署冒烟新发现（#19 关联）：生产 Ghostscript 10.x 对加密 PDF 返回码为 0
         # 且仍写出空白壳 PDF（"No pages will be processed"），用户会静默拿到废文件；
         # pypdf fallback 则抛 FileNotDecryptedError。统一在入口拦截，给 400 中文引导。
         from pypdf import PdfReader
 
-        if PdfReader(self.file_path).is_encrypted:
+        reader = PdfReader(self.file_path)
+        if reader.is_encrypted:
             raise ValueError("PDF 已加密，请先用「解除 PDF 密码」工具解密后再压缩")
+        # 审计 L11：0 页 PDF 压缩会产出空文件，前置拦截
+        if len(reader.pages) == 0:
+            raise ValueError("PDF 没有任何页面，无法压缩")
 
         settings = self.LEVELS[level]
         gs_cmd = self._find_gs()
@@ -125,10 +129,20 @@ class PDFCompressor:
             logger.error("Ghostscript produced empty output, falling back to pypdf")
             return self._fallback_compress(output_path)
 
-        logger.info(
-            f"GS compressed PDF: {os.path.getsize(self.file_path)} -> "
-            f"{os.path.getsize(output_path)} bytes"
-        )
+        # 审计 L30：gs 路径与 fallback 同规则——输出 ≥ 输入时回传原文件，
+        # 路由按实际体积给出如实文案（不再"压缩"出更大的文件还报完成）
+        in_size = os.path.getsize(self.file_path)
+        out_size = os.path.getsize(output_path)
+        if out_size >= in_size:
+            logger.info(
+                f"GS compression ineffective ({in_size} -> {out_size} bytes), "
+                "returning original file content"
+            )
+            shutil.copyfile(self.file_path, output_path)
+        else:
+            logger.info(
+                f"GS compressed PDF: {in_size} -> {out_size} bytes"
+            )
         return output_path
 
     def _fallback_compress(self, output_path: str) -> str:

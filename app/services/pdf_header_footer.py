@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date
 from typing import Optional
 
@@ -162,12 +163,31 @@ class PDFHeaderFooter:
             raise ValueError("页码起始值无效")
         if not (18 <= margin <= 90):
             raise ValueError("边距需在 18-90 磅之间")
+        # 审计 L8：参数组合校验——margin=18 + 字号 24（均合法）会让页脚基线
+        # 距页底 2pt 降部裁字、页眉压正文。要求边距 ≥ 所用字号 × 1.5。
+        used_styles = []
+        if header_text:
+            used_styles.append(("页眉", header_font_size))
+        if footer_text:
+            used_styles.append(("页脚", footer_font_size))
+        if page_number_position != "none":
+            used_styles.append(("页码", page_font_size))
+        for name, size in used_styles:
+            if margin < size * 1.5:
+                raise ValueError(
+                    f"边距过小：{name}边距需不小于对应字号的 1.5 倍"
+                    f"（当前边距 {margin:g} 磅、{name}字号 {size:g} 磅）"
+                )
         if header_text and len(header_text) > 200:
             raise ValueError("页眉文字过长（上限 200 字符）")
         if footer_text and len(footer_text) > 200:
             raise ValueError("页脚文字过长（上限 200 字符）")
 
         doc = fitz.open(self.input_path)
+        # 审计 L9：加密前置检查（对照 rotator/organizer），避免库层英文错误直出
+        if doc.needs_pass or doc.is_encrypted:
+            doc.close()
+            raise ValueError("PDF 已加密，请先用「解除 PDF 密码」工具解密后再上传")
         total = len(doc)
         if total == 0:
             doc.close()
@@ -296,6 +316,12 @@ class PDFHeaderFooter:
         return False
 
     def _render_vars(self, text: str, base_name: str, page_num: int, total: int) -> str:
+        """渲染 {filename}/{date}/{year}/{page}/{pages} 占位符。
+
+        审计 L7：必须一次性格式化——此前逐个 str.replace，文件名本身含
+        "{date}"/"{page}" 时会被二次替换（report_{date}_v{page}.pdf →
+        report_2026-09-29_v1）。re.sub 单遍替换，替换值不再参与扫描。
+        """
         today = date.today()
         replacements = {
             "{filename}": base_name,
@@ -304,9 +330,11 @@ class PDFHeaderFooter:
             "{page}": str(page_num),
             "{pages}": str(total),
         }
-        for k, v in replacements.items():
-            text = text.replace(k, v)
-        return text
+        return re.sub(
+            r"\{filename\}|\{date\}|\{year\}|\{page\}|\{pages\}",
+            lambda m: replacements[m.group()],
+            text,
+        )
 
     def _format_page_number(self, fmt: str, num: int, total: int) -> str:
         if fmt == "plain":

@@ -1,7 +1,11 @@
 import os
+import re
+import shutil
+import time
 from pathlib import Path
 from typing import List
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from app.config import settings
@@ -61,16 +65,31 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 from pypdf.errors import PdfReadError
 
+from app.core.errors import friendly_detail
+
 # 审计 #13：加密 PDF 在 pypdf 系服务（split/merge/compress/protect/remove-pages）
 # 统一给 400 中文引导，而非被当服务器故障报 500
 _MSG_ENCRYPTED_PDF = "PDF 已加密，请先用「解除 PDF 密码」工具解密后再上传"
+# 审计 P3 英文错误族：库层英文 ValueError（fitz "document closed or encrypted"
+# 经 ValueError→400 直出等）的通用兜底文案
+_MSG_GENERIC_PROCESS = "处理失败，请检查文件后重试"
+
+
+def _friendly_value_detail(e: Exception) -> str:
+    """ValueError 消息中文化：业务中文文案原样返回；库层英文给兜底；
+    消息里含加密字样的映射为解密引导。"""
+    msg = str(e)
+    lowered = msg.lower()
+    if "encrypt" in lowered or "password" in lowered:
+        return _MSG_ENCRYPTED_PDF
+    return friendly_detail(e, _MSG_GENERIC_PROCESS)
 
 
 def raise_processing_error(error: Exception):
     if isinstance(error, HTTPException):
         raise error
     if isinstance(error, ValueError):
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(status_code=400, detail=_friendly_value_detail(error))
     # FileNotDecryptedError 的 MRO 是 PdfReadError → PyPdfError → Exception，
     # 不在 ValueError 下；pdf2docx 的 "Require password"（to-word 加密 PDF）同理
     if isinstance(error, PdfReadError) or "password" in str(error).lower():
@@ -109,7 +128,10 @@ async def split_pdf(
 
     try:
         splitter = PDFSplitter(input_path)
-        output_paths = splitter.split(mode=mode, value=value, output_dir=task_dir)
+        # 审计 #17：大文档拆分可达秒级，同步重活放线程池，不阻塞事件循环
+        output_paths = await run_in_threadpool(
+            splitter.split, mode=mode, value=value, output_dir=task_dir
+        )
 
         # For single output, return directly; for multiple, zip them
         if len(output_paths) == 1:
@@ -149,18 +171,34 @@ async def merge_pdf(
             detail=f"Maximum {settings.MAX_FILES_PER_REQUEST} files allowed",
         )
 
+    # 审计 #20：merge 系补总量守卫（此前单文件各 ≤50MB 但 20 个可合计 1GB）
+    # 声明值预检（快速失败）+ 落盘后实际字节累计（防 Content-Length 伪造）双保险
+    if sum(f.size or 0 for f in files) > 2 * settings.MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="所有文件加起来不能超过 100MB，请分批处理",
+        )
+
     task_id, task_dir = make_task_dir(TEMP_DIR)
 
     input_paths = []
+    total_written = 0
     for f in files:
         validate_pdf(f)
         path = save_pdf(f, task_dir, f"input_{len(input_paths)}.pdf")
+        total_written += os.path.getsize(path)
+        if total_written > 2 * settings.MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail="所有文件加起来不能超过 100MB，请分批处理",
+            )
         input_paths.append(path)
 
     try:
         output_path = safe_join(task_dir, "merged.pdf")
         merger = PDFMerger(input_paths)
-        merger.merge(output_path)
+        # 审计 #17：多文件合并读取可达秒级，放线程池
+        await run_in_threadpool(merger.merge, output_path)
 
         # TODO: Upload to COS
         download_url = f"/api/v1/pdf/download/{task_id}"
@@ -195,19 +233,49 @@ async def merge_batch(
     if total < 1 or total > settings.MAX_FILES_PER_REQUEST or index < 0 or index >= total:
         raise HTTPException(status_code=400, detail="\u4e0a\u4f20\u5e8f\u53f7\u65e0\u6548")
 
+    # 审计 L3：半成品批次目录超过 2 小时视为已废弃（前端会话早已丢失），
+    # 清空重建，避免"缺 index 任务永久卡 uploading"
+    try:
+        if time.time() - os.path.getmtime(task_dir) > 7200:
+            shutil.rmtree(task_dir, ignore_errors=True)
+            os.makedirs(task_dir, exist_ok=True)
+    except OSError:
+        pass
+
+    # 审计 L3：同 index 重复上传此前静默覆盖，显式拒绝
+    if os.path.exists(os.path.join(task_dir, f"{index}.pdf")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"第 {index + 1} 个文件已上传过，请勿重复提交",
+        )
+
     input_path = save_pdf(file, task_dir, f"{index}.pdf")
+
+    # 审计 #20：merge-batch 累计落盘量守卫（与 /merge 同一总量上限）
+    total_written = sum(
+        os.path.getsize(os.path.join(task_dir, name))
+        for name in os.listdir(task_dir)
+        if name.endswith(".pdf")
+    )
+    if total_written > 2 * settings.MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="所有文件加起来不能超过 100MB，请分批处理",
+        )
 
     logger.info(f"Merge-batch task {task_id}: received file {index + 1}/{total}")
 
     # Check if all files have been uploaded
-    uploaded = set(os.listdir(task_dir))
+    # 审计 L2：进度只统计 PDF（此前把 upload_names.txt 也计入，
+    # 显示"已上传 2/2"实际 1/2）
+    uploaded = {f for f in os.listdir(task_dir) if f.endswith(".pdf")}
     expected = {f"{i}.pdf" for i in range(total)}
 
     if not (uploaded >= expected):
         return TaskResponse(
             task_id=task_id,
             status="uploading",
-            message=f"已上传 {len(uploaded)} / {total} 个文件",
+            message=f"已上传 {len(uploaded & expected)} / {total} 个文件",
             download_url="",
             file_count=0,
         )
@@ -217,7 +285,8 @@ async def merge_batch(
         input_paths = [safe_join(task_dir, f"{i}.pdf") for i in range(total)]
         output_path = safe_join(task_dir, "merged.pdf")
         merger = PDFMerger(input_paths)
-        merger.merge(output_path)
+        # 审计 #17：合并放线程池
+        await run_in_threadpool(merger.merge, output_path)
 
         download_url = f"/api/v1/pdf/download/{task_id}"
         logger.info(f"Merge-batch task {task_id} completed: {total} files")
@@ -256,7 +325,8 @@ async def protect_pdf(
     try:
         output_path = safe_join(task_dir, "protected.pdf")
         protector = PDFProtector(input_path)
-        protector.protect(
+        await run_in_threadpool(
+            protector.protect,
             output_path=output_path,
             user_password=password,
             allow_printing=allow_printing,
@@ -296,7 +366,7 @@ async def unlock_pdf(
     try:
         output_path = safe_join(task_dir, "unlocked.pdf")
         unlocker = PDFUnlocker(input_path)
-        result = unlocker.unlock(output_path, password=password)
+        result = await run_in_threadpool(unlocker.unlock, output_path, password=password)
 
         download_url = f"/api/v1/pdf/download/{task_id}"
         message = (
@@ -312,8 +382,9 @@ async def unlock_pdf(
             file_count=1,
         )
     except ValueError as e:
+        # 审计 L1：与其他端点对齐为 400（此前 422，错误码契约不一致）
         logger.warning(f"Unlock-PDF task {task_id} rejected: {e}")
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=400, detail=_friendly_value_detail(e))
     except Exception as e:
         logger.error(f"Unlock-PDF task {task_id} failed: {e}")
         raise_processing_error(e)
@@ -374,7 +445,9 @@ async def remove_pages(
             raise HTTPException(status_code=400, detail="不能删除所有页面，至少需要保留一页")
 
         output_path = safe_join(task_dir, "removed.pdf")
-        remaining = remover.remove_pages(pages_to_remove, output_path)
+        remaining = await run_in_threadpool(
+            remover.remove_pages, pages_to_remove, output_path
+        )
 
         # 删除原文件，避免下载接口 fallback 时返回原文件
         if os.path.exists(input_path):
@@ -391,7 +464,7 @@ async def remove_pages(
             file_count=1,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=_friendly_value_detail(e))
     except Exception as e:
         logger.error(f"Remove-pages task {task_id} failed: {e}")
         raise_processing_error(e)
@@ -425,7 +498,9 @@ async def rotate_pdf(
                 raise HTTPException(status_code=400, detail="未指定有效的旋转页码")
 
         output_path = safe_join(task_dir, "rotated.pdf")
-        total, rotated = rotator.rotate(angle, output_path, pages=pages_set)
+        total, rotated = await run_in_threadpool(
+            rotator.rotate, angle, output_path, pages=pages_set
+        )
 
         if os.path.exists(input_path):
             os.remove(input_path)
@@ -443,7 +518,7 @@ async def rotate_pdf(
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=_friendly_value_detail(e))
     except Exception as e:
         logger.error(f"Rotate task {task_id} failed: {e}")
         raise_processing_error(e)
@@ -486,7 +561,8 @@ async def watermark_pdf(
         output_path = safe_join(task_dir, "watermarked.pdf")
 
         if wm_type == "text":
-            total, applied = watermarker.watermark_text(
+            total, applied = await run_in_threadpool(
+                watermarker.watermark_text,
                 text,
                 output_path,
                 opacity=opacity,
@@ -525,7 +601,8 @@ async def watermark_pdf(
                 raise HTTPException(status_code=400, detail="水印图片文件内容与扩展名不符")
             if ext in (".jpg", ".jpeg") and not magic.startswith(b"\xff\xd8"):
                 raise HTTPException(status_code=400, detail="水印图片文件内容与扩展名不符")
-            total, applied = watermarker.watermark_image(
+            total, applied = await run_in_threadpool(
+                watermarker.watermark_image,
                 image_bytes,
                 output_path,
                 opacity=opacity,
@@ -551,7 +628,7 @@ async def watermark_pdf(
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=_friendly_value_detail(e))
     except Exception as e:
         logger.error(f"Watermark task {task_id} failed: {e}")
         raise_processing_error(e)
@@ -582,7 +659,9 @@ async def organize_pdf(
         entries = parse_order(order, total_pages)
 
         output_path = safe_join(task_dir, "organized.pdf")
-        src_total, out_total = organizer.organize(entries, output_path)
+        src_total, out_total = await run_in_threadpool(
+            organizer.organize, entries, output_path
+        )
 
         if os.path.exists(input_path):
             os.remove(input_path)
@@ -601,7 +680,7 @@ async def organize_pdf(
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=_friendly_value_detail(e))
     except Exception as e:
         logger.error(f"Organize task {task_id} failed: {e}")
         raise_processing_error(e)
@@ -620,7 +699,8 @@ async def compress_pdf(
     try:
         output_path = safe_join(task_dir, "compressed.pdf")
         compressor = PDFCompressor(input_path)
-        compressor.compress(output_path, level=level)
+        # 审计 #17：gs 子进程最长 120s，放线程池
+        await run_in_threadpool(compressor.compress, output_path, level=level)
 
         download_url = f"/api/v1/pdf/download/{task_id}"
 
@@ -679,7 +759,8 @@ async def add_header_footer(
     try:
         output_path = safe_join(task_dir, "header-footer.pdf")
         hf = PDFHeaderFooter(input_path)
-        info = hf.apply(
+        info = await run_in_threadpool(
+            hf.apply,
             output_path,
             header_text=header_text.strip() or None,
             header_position=header_position,
@@ -720,7 +801,7 @@ async def add_header_footer(
             file_count=1,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=_friendly_value_detail(e))
     except Exception as e:
         logger.error(f"Header-footer task {task_id} failed: {e}")
         raise_processing_error(e)
@@ -739,9 +820,11 @@ async def pdf_to_word(
     try:
         output_path = safe_join(task_dir, "converted.docx")
         converter = PDFToWordConverter()
-        info = converter.convert(
+        # 审计 #17：pdf2docx 逐页解析可达数十秒，放线程池
+        info = await run_in_threadpool(
+            converter.convert,
             input_path, output_path,
-            pages=pages if pages != "all" else None
+            pages=pages if pages != "all" else None,
         )
 
         download_url = f"/api/v1/pdf/download/{task_id}"
@@ -772,7 +855,11 @@ async def pdf_to_markdown(
     try:
         output_path = safe_join(task_dir, "output.md")
         converter = PDFToMarkdownConverter()
-        info = converter.convert(input_path, output_path, pages=pages if pages != "all" else None)
+        # 审计 #17：pymupdf4llm 逐页解析可达秒级，放线程池
+        info = await run_in_threadpool(
+            converter.convert, input_path, output_path,
+            pages=pages if pages != "all" else None,
+        )
 
         download_url = f"/api/v1/pdf/download/{task_id}"
 
@@ -812,6 +899,24 @@ def validate_ofd(file: UploadFile):
     validate_upload(file, OFD_EXTENSIONS)
 
 
+# 审计 #18：MarkItDown 无 legacy Office 转换器，.doc/.ppt/.xls 直转必抛
+# UnsupportedFormatException/FileConversionException → 500。显式 415 并给
+# 另存为引导（office→PDF 走 LibreOffice 支持老格式，不受影响）
+_LEGACY_OFFICE_EXTS = (".doc", ".ppt", ".xls")
+
+
+def _reject_legacy_office(file: UploadFile, modern_ext: str):
+    name = (file.filename or "").lower()
+    if name.endswith(_LEGACY_OFFICE_EXTS):
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"暂不支持老版本 Office 格式（{Path(name).suffix}），"
+                f"请先用 Office 另存为 {modern_ext} 后重试"
+            ),
+        )
+
+
 def save_upload_by_type(
     file: UploadFile,
     task_dir: str,
@@ -833,12 +938,16 @@ async def word_to_pdf(
     validate_word(file)
     task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = save_upload_by_type(file, task_dir, "input.docx", WORD_EXTENSIONS)
+    # 审计 #18 关联：.doc 老格式保留真实扩展名落盘（此前一律存成 input.docx，
+    # LibreOffice 按扩展名选导入过滤器，错配可能转换失败或版式错乱）
+    suffix = Path(file.filename or "").suffix.lower() or ".docx"
+    input_path = save_upload_by_type(file, task_dir, f"input{suffix}", WORD_EXTENSIONS)
 
     try:
         output_path = safe_join(task_dir, "converted.pdf")
         converter = WordConverter(input_path)
-        converter.convert(output_path)
+        # 审计 #17：LibreOffice 子进程最长 120s，放线程池
+        await run_in_threadpool(converter.convert, output_path)
 
         download_url = f"/api/v1/pdf/download/{task_id}"
 
@@ -862,12 +971,15 @@ async def ppt_to_pdf(
     validate_ppt(file)
     task_id, task_dir = make_task_dir(TEMP_DIR)
 
-    input_path = save_upload_by_type(file, task_dir, "input.pptx", PPT_EXTENSIONS)
+    # 审计 #18 关联：.ppt 老格式保留真实扩展名落盘（同 word-to-pdf）
+    suffix = Path(file.filename or "").suffix.lower() or ".pptx"
+    input_path = save_upload_by_type(file, task_dir, f"input{suffix}", PPT_EXTENSIONS)
 
     try:
         output_path = safe_join(task_dir, "converted.pdf")
         converter = WordConverter(input_path)
-        converter.convert(output_path)
+        # 审计 #17：LibreOffice 子进程最长 120s，放线程池
+        await run_in_threadpool(converter.convert, output_path)
 
         download_url = f"/api/v1/pdf/download/{task_id}"
 
@@ -897,7 +1009,9 @@ async def pdf_to_jpg(
 
     try:
         converter = PDFToImageConverter(input_path)
-        image_paths = converter.convert(
+        # 审计 #17：逐页渲染大文档可达秒级~分钟级，放线程池
+        image_paths = await run_in_threadpool(
+            converter.convert,
             output_dir=task_dir,
             format="jpg" if format == "jpg" else "png",
             pages=pages,
@@ -936,7 +1050,8 @@ async def extract_images(file: UploadFile = File(...)):
 
     try:
         extractor = PDFImageExtractor(input_path)
-        images = extractor.extract(safe_join(task_dir, "images"))
+        # 审计 #17：图片抽取可达秒级，放线程池
+        images = await run_in_threadpool(extractor.extract, safe_join(task_dir, "images"))
 
         if not images:
             raise HTTPException(
@@ -991,11 +1106,20 @@ async def ofd_to_pdf(
 
         if not success:
             logger.error(f"OFD-to-PDF task {task_id} failed: {result}")
+            # 审计 L28：result 可能是异常 repr（"AssertionError: ..."），
+            # 剥离异常类名前缀；纯 ASCII（库层英文）不给直出
+            raw_msg = (result or "").strip()
+            raw_msg = re.sub(
+                r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Assertion\w*)\s*:\s*",
+                "",
+                raw_msg,
+            )
+            if not raw_msg or raw_msg.isascii():
+                raw_msg = "该文件可能包含不受支持的电子签章或版式特性"
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"OFD 转换失败：{result or '未知错误'}。"
-                    "该文件可能包含不受支持的电子签章或版式特性，"
+                    f"OFD 转换失败：{raw_msg}。"
                     "请确认其为标准 OFD 文件后重试。"
                 ),
             )
@@ -1022,6 +1146,7 @@ async def word_to_markdown(
     file: UploadFile = File(...),
 ):
     validate_word(file)
+    _reject_legacy_office(file, ".docx")
     task_id, task_dir = make_task_dir(TEMP_DIR)
 
     input_path = save_upload_by_type(file, task_dir, "input.docx", WORD_EXTENSIONS)
@@ -1029,7 +1154,8 @@ async def word_to_markdown(
     try:
         output_path = safe_join(task_dir, "converted.md")
         converter = OfficeToMarkdownConverter()
-        info = converter.convert(input_path, output_path)
+        # 审计 #17：MarkItDown 解析可达秒级，放线程池
+        info = await run_in_threadpool(converter.convert, input_path, output_path)
 
         download_url = f"/api/v1/pdf/download/{task_id}"
 
@@ -1051,6 +1177,7 @@ async def ppt_to_markdown(
     file: UploadFile = File(...),
 ):
     validate_ppt(file)
+    _reject_legacy_office(file, ".pptx")
     task_id, task_dir = make_task_dir(TEMP_DIR)
 
     input_path = save_upload_by_type(file, task_dir, "input.pptx", PPT_EXTENSIONS)
@@ -1058,7 +1185,8 @@ async def ppt_to_markdown(
     try:
         output_path = safe_join(task_dir, "converted.md")
         converter = OfficeToMarkdownConverter()
-        info = converter.convert(input_path, output_path)
+        # 审计 #17：MarkItDown 解析可达秒级，放线程池
+        info = await run_in_threadpool(converter.convert, input_path, output_path)
 
         download_url = f"/api/v1/pdf/download/{task_id}"
 
@@ -1080,6 +1208,7 @@ async def excel_to_markdown(
     file: UploadFile = File(...),
 ):
     validate_excel(file)
+    _reject_legacy_office(file, ".xlsx")
     task_id, task_dir = make_task_dir(TEMP_DIR)
 
     input_path = save_upload_by_type(file, task_dir, "input.xlsx", EXCEL_EXTENSIONS)
@@ -1087,7 +1216,8 @@ async def excel_to_markdown(
     try:
         output_path = safe_join(task_dir, "converted.md")
         converter = OfficeToMarkdownConverter()
-        info = converter.convert(input_path, output_path)
+        # 审计 #17：MarkItDown 解析可达秒级，放线程池
+        info = await run_in_threadpool(converter.convert, input_path, output_path)
 
         download_url = f"/api/v1/pdf/download/{task_id}"
 
@@ -1116,9 +1246,10 @@ async def jpg_to_pdf(
             detail=f"Maximum {settings.MAX_FILES_PER_REQUEST} files allowed",
         )
 
-    # 总量守卫：单文件各 ≤ MAX_UPLOAD_SIZE，但 20 × 50MB 合计可达 1GB
-    total_size = sum(f.size or 0 for f in files)
-    if total_size > 2 * settings.MAX_UPLOAD_SIZE:
+    # 总量守卫：单文件各 ≤ MAX_UPLOAD_SIZE，但 20 × 50MB 合计可达 1GB。
+    # 审计 #20：声明值预检可被省略/伪造的 Content-Length 绕过（size=None 按 0 计），
+    # 故再按流式落盘后的实际字节累计，超限立即中止（上限 100MB）
+    if sum(f.size or 0 for f in files) > 2 * settings.MAX_UPLOAD_SIZE:
         raise HTTPException(
             status_code=400,
             detail="所有图片加起来不能超过 100MB，请分批处理",
@@ -1127,6 +1258,7 @@ async def jpg_to_pdf(
     task_id, task_dir = make_task_dir(TEMP_DIR)
 
     input_paths = []
+    total_written = 0
     for f in files:
         suffix = validate_extension(f.filename, IMAGE_EXTENSIONS)
         path = save_upload_file(
@@ -1135,12 +1267,20 @@ async def jpg_to_pdf(
             settings.MAX_UPLOAD_SIZE,
             IMAGE_EXTENSIONS,
         )
+        total_written += os.path.getsize(path)
+        if total_written > 2 * settings.MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail="所有图片加起来不能超过 100MB，请分批处理",
+            )
         input_paths.append(path)
 
     try:
         output_path = safe_join(task_dir, "images.pdf")
         converter = ImageToPDFConverter()
-        converter.convert(
+        # 审计 #17：图片解码+组页可达秒级，放线程池
+        await run_in_threadpool(
+            converter.convert,
             image_paths=input_paths,
             output_path=output_path,
             orientation="portrait" if orientation == "portrait" else "landscape",

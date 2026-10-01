@@ -21,19 +21,22 @@ class PDFSplitter:
         self, mode: str = "all", value: str = "", output_dir: str = "."
     ) -> List[str]:
         if self.total_pages == 0:
-            raise ValueError("PDF has no pages")
+            raise ValueError("PDF 没有任何页面")
 
         if mode == "all":
             return self._split_all(output_dir)
         elif mode == "ranges":
             return self._split_ranges(value, output_dir)
         elif mode == "fixed":
-            pages_per_file = int(value) if value else 1
+            try:
+                pages_per_file = int(value) if value else 1
+            except ValueError:
+                raise ValueError("每个文件页数需为正整数，如：2")
             if pages_per_file < 1:
-                raise ValueError("每个文件页数需为正整数")
+                raise ValueError("每个文件页数需为正整数，如：2")
             return self._split_fixed(pages_per_file, output_dir)
         else:
-            raise ValueError(f"Unknown split mode: {mode}")
+            raise ValueError(f"不支持的拆分模式：{mode}")
 
     def _split_all(self, output_dir: str) -> List[str]:
         """Extract each page as a separate PDF."""
