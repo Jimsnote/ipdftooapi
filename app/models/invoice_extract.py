@@ -90,3 +90,21 @@ class ExportResponse(BaseModel):
     download_url: str
     filename: str
     count: int
+
+
+class RenameSkippedItem(BaseModel):
+    """批量重命名中未识别（保留原名进 ZIP）的文件。"""
+
+    file: str
+    reason: str
+
+
+class RenameBatchResponse(BaseModel):
+    """POST /invoice/rename-batch 响应。"""
+
+    task_id: str
+    download_url: str
+    total: int
+    renamed: int
+    duplicates_resolved: int
+    skipped: List[RenameSkippedItem]

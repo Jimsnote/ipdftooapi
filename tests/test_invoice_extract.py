@@ -110,7 +110,11 @@ class TestXmlAdapter:
 # PDF 夹具（fitz 合成官方横版文字层）
 # ---------------------------------------------------------------------------
 
-def _make_pdf_bytes(with_text: bool = True) -> bytes:
+def _make_pdf_bytes(
+    with_text: bool = True,
+    buyer: str = "中国人民财产保险股份有限公司",
+    seller: str = "北京创信卓远信息技术有限公司",
+) -> bytes:
     doc = fitz.open()
     page = doc.new_page(width=595.28, height=396.85)
     if with_text:
@@ -125,9 +129,9 @@ def _make_pdf_bytes(with_text: bool = True) -> bytes:
         put(438.0, 56.6, "开票日期：")
         put(484.0, 56.6, "2026年08月25日")
         put(32.7, 103.5, "名称：")
-        put(57.0, 103.5, "中国人民财产保险股份有限公司")
+        put(57.0, 103.5, buyer)
         put(317.6, 103.5, "名称：")
-        put(341.0, 103.5, "北京创信卓远信息技术有限公司")
+        put(341.0, 103.5, seller)
         put(153.1, 132.6, "91100000710931483R")
         put(437.9, 132.6, "9111010859062383XH")
         put(13.8, 167.9, "*软件服务*技术服务费")
@@ -155,6 +159,19 @@ class TestPdfAdapter:
         )
         assert rec.item_count == 1
         assert rec.remark and "合同编号" in rec.remark
+
+    def test_personal_name_buyer(self):
+        """个人抬头（3 字人名）购方名称可识别（实测福建省供暖费票回归）。"""
+        rec = extract_bytes(
+            _make_pdf_bytes(
+                buyer="陈秋生",
+                seller="北京工大融实物业管理有限公司武圣东里供热站",
+            ),
+            "inv.pdf",
+            ".pdf",
+        )
+        assert rec.buyer_name == "陈秋生"
+        assert rec.seller_name == "北京工大融实物业管理有限公司武圣东里供热站"
 
     def test_scanned_pdf_rejected(self):
         with pytest.raises(InvoiceExtractError) as ei:
@@ -258,6 +275,30 @@ class TestOfdAdapter:
         assert rec.buyer_name == "海港人寿保险股份有限公司"
         assert rec.seller_name == "北京创信卓远信息技术有限责任公司"
         assert rec.amount_without_tax == "11320.75"
+
+    def test_fallback_zone_personal_name(self):
+        """无 CustomTag 回退路径：3 字人名购方可识别（与 PDF 适配器同规则）。"""
+        entries = [
+            ("9101", 170, 10.3, "26112233445566778899"),
+            ("9102", 170, 16.4, "2026年06月03日"),
+            ("9103", 20, 33.8, "陈秋生"),
+            ("9104", 54, 43.3, "91440300MACNKMUC8X"),
+            ("9105", 120, 33.8, "北京创信卓远信息技术有限责任公司"),
+            ("9106", 154, 43.3, "9111010859062383XH"),
+            ("9107", 179.5, 100.0, "¥12000.00"),
+        ]
+        data = _zip_ofd(
+            {
+                "Doc_0/Pages/Page_0/Content.xml": _page_xml(entries),
+                "Doc_0/Tpls/Tpl_0/Content.xml": _page_xml(
+                    [("9100", 100, 11, "电子发票（普通发票）")]
+                ),
+            },
+            {},
+        )
+        rec = extract_bytes(data, "p.ofd", ".ofd")
+        assert rec.buyer_name == "陈秋生"
+        assert rec.seller_name == "北京创信卓远信息技术有限责任公司"
 
     def test_unrelated_zip_rejected(self):
         buf = io.BytesIO()

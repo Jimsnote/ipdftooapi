@@ -56,6 +56,18 @@ def _strip_label(text: str) -> str:
     return _LABEL_PREFIX_RE.sub("", text).strip()
 
 
+def _looks_like_name(text: str) -> bool:
+    """名称判定（个人抬头兼容）：≥2 字符（2-3 字人名常见）、含 CJK、
+    非税号/金额样貌。旧阈值 ≥4 会误杀"陈秋生"式个人抬头发票（实测样本）。"""
+    t = _strip_label(text)
+    return (
+        len(t) >= 2
+        and re.search(r"[\u4e00-\u9fff]", t) is not None
+        and not TAX_ID_RE.match(t)
+        and not AMOUNT_SPAN_RE.match(t)
+    )
+
+
 def _collect_spans(doc: "fitz.Document") -> List[List[Tuple[float, float, float, float, str]]]:
     """按页收集文本 span：返回 [第 N 页的 [(x0, y0, x1, y1, text)]]（绝对 pt 坐标）。
 
@@ -107,6 +119,11 @@ def extract_pdf_bytes(data: bytes, source_file: str) -> InvoiceRecord:
         doc = fitz.open(stream=data, filetype="pdf")
     except Exception as e:  # noqa: BLE001
         raise InvoiceExtractError(f"无法打开 PDF：{e}") from e
+    # 审查②：口令保护 PDF fitz.open 会成功，后续 get_text 抛库层异常
+    # 落入"解析失败"误导文案——前置明确提示（与 compress 入口 is_encrypted 预检同思路）
+    if doc.needs_pass:
+        doc.close()
+        raise InvoiceExtractError("该 PDF 已加密，请先解除密码保护后重试")
     try:
         full_text = "".join(page.get_text("text") for page in doc)
         if len(full_text.strip()) < 50:
@@ -193,7 +210,7 @@ def _extract_from_spans(
     buyer_name = seller_name = None
     # 注意不能用关键词排除公司名（如"XX信息技术有限公司"含"信息"）；
     # 水印单字与"名称："标签分别被长度条件与前缀剥离过滤。
-    name_hits = _pick(spans, Y_NAME, lambda s: len(_strip_label(s[4])) >= 4)
+    name_hits = _pick(spans, Y_NAME, lambda s: _looks_like_name(s[4]))
     # 同侧多个 span（长名称被拆行）时合并：按 y 再分组太复杂，v1 取每侧最宽的一个
     for side_key in ("buyer", "seller"):
         cand = [s for s in name_hits if side_of(s) == side_key]

@@ -296,8 +296,9 @@ def _extract_by_zone(texts: _OfdText, source_file: str) -> InvoiceRecord:
 
     def looks_like_name(t: str) -> bool:
         t = _strip_label(t)
+        # ≥2 字符：个人抬头 2-3 字人名常见，旧阈值 ≥4 会误杀（与 PDF 适配器同步）
         return (
-            len(t) >= 4
+            len(t) >= 2
             and re.search(r"[\u4e00-\u9fff]", t)
             and not any(k in t for k in _NAME_EXCLUDE)
             and not TAX_ID_RE.match(t)
