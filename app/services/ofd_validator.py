@@ -20,6 +20,7 @@ import multiprocessing
 import os
 import shutil
 import threading
+import time
 import zipfile
 
 import fitz
@@ -316,17 +317,60 @@ def _get_mp_pool() -> "multiprocessing.Pool":
         return _mp_pool
 
 
-def _destroy_mp_pool() -> None:
-    """terminate 掉整个转换池（超时/池异常时调用），下次调用惰性重建。"""
-    global _mp_pool
-    with _mp_lock:
-        if _mp_pool is not None:
+# join 限时：terminate 后 worker 应秒退；SIGKILL 兜底后仍不退则放弃等待
+_POOL_JOIN_TIMEOUT_SECONDS = 5.0
+
+
+def _hard_close_pool(pool: "multiprocessing.Pool") -> None:
+    """terminate + SIGKILL 兜底 + 限时 join，确保池 worker 必死且被收割。
+
+    缺陷背景（ofd-render-defect-2026-10-07 / 2026-10-08 香港机 13:09 事故）：
+    旧实现 terminate() + join() 在锁内执行且 join 无超时——worker 卡死不退时
+    join 永久阻塞，_mp_lock 被占死，后续所有 _get_mp_pool 调用者在
+    run_in_executor 上无限挂起，整个转换路径报废直到重启；且未 join 成功
+    的 worker 变 defunct 僵尸。
+    """
+    try:
+        pool.terminate()
+    except Exception:
+        pass
+    # 直接对 worker 进程做限时 join，不依赖 Pool.join()（其无超时参数且
+    # 会连带等 handler 线程，卡死场景下同样挂起）
+    workers = list(getattr(pool, "_pool", None) or [])
+    deadline = time.monotonic() + _POOL_JOIN_TIMEOUT_SECONDS
+    for w in workers:
+        remaining = max(0.1, deadline - time.monotonic())
+        try:
+            w.join(timeout=remaining)
+        except Exception:
+            pass
+        if w.is_alive():
+            # SIGTERM 被忽略（如卡在不可中断的 C 扩展里）时 SIGKILL 兜底，
+            # kill 后内核保证进程退出，join 短等收割、杜绝 defunct 僵尸
             try:
-                _mp_pool.terminate()
-                _mp_pool.join()
+                w.kill()
+                w.join(timeout=2)
             except Exception:
                 pass
-            _mp_pool = None
+    try:
+        pool.join()
+    except Exception:
+        pass
+
+
+def _destroy_mp_pool() -> None:
+    """terminate 掉整个转换池（超时/池异常时调用），下次调用惰性重建。
+
+    锁内只做「摘引用」，销毁动作（terminate/join）全部放锁外限时执行：
+    销毁再慢也不会占住 _mp_lock 阻塞后续 _get_mp_pool——期间并发请求
+    会惰性新建一个健康池继续服务，而不是排队等一个卡死的销毁。
+    """
+    global _mp_pool
+    with _mp_lock:
+        pool, _mp_pool = _mp_pool, None
+    if pool is None:
+        return
+    _hard_close_pool(pool)
 
 
 async def convert_ofd_to_pdf(
@@ -346,18 +390,32 @@ async def convert_ofd_to_pdf(
     async with _semaphore:
         pool = None
         try:
-            pool = await loop.run_in_executor(None, _get_mp_pool)
+            # 池获取也必须限时：防御历史版本/并发销毁场景下锁被长期占用，
+            # 此处一旦无限挂起整个 API 转换路径报废（2026-10-08 香港事故）
+            pool = await asyncio.wait_for(
+                loop.run_in_executor(None, _get_mp_pool), timeout=10
+            )
+        except asyncio.TimeoutError:
+            logger.warning("conversion process pool acquire timed out, using thread")
+            pool = None
         except Exception as e:
             logger.warning(f"conversion process pool unavailable, using thread: {e}")
             pool = None
         try:
             if pool is not None:
-                return await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None, pool.apply, _convert_job, (input_path, output_path, crop)
-                    ),
-                    timeout=CONVERSION_TIMEOUT_SECONDS,
-                )
+                try:
+                    return await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, pool.apply, _convert_job, (input_path, output_path, crop)
+                        ),
+                        timeout=CONVERSION_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    raise
+                except (ValueError, OSError) as e:
+                    # apply 前一刻池刚被并发超时销毁（Pool not running）：
+                    # 降级线程路径重试一次，而不是把异常抛给用户
+                    logger.warning(f"process pool closed mid-flight, falling back to thread: {e}")
             # 降级路径：线程池执行（无进程隔离，行为与旧实现一致）
             return await asyncio.wait_for(
                 loop.run_in_executor(

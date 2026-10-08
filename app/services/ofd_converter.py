@@ -123,8 +123,60 @@ def _patch_easyofd_cmp_offset() -> None:
     logger.info("已应用 easyofd 字距缩放补丁（g 分支乘 CTM resize）")
 
 
+# Linux 系统自带 CJK 字体候选（按优先级）；测试可 monkeypatch 此常量
+_CJK_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+]
+
+
+def _patch_easyofd_font() -> None:
+    """
+    方案 A（缺陷报告 ofd-render-defect-2026-10-07）：注册系统 CJK 字体占用「宋体」名。
+
+    缺陷：easyofd/draw/draw_pdf.py 的 draw_chars 把字体名硬编码为
+    ``font = "宋体"``（font_info 取到文档字体后根本没用），而 easyofd 的
+    parser_ofd/__init__.py 用裸文件名（simsun.ttc 等）注册字体，Linux 上
+    必然失败（系统无 Windows 字体、CWD 也无该文件，生产日志 1924 次
+    registerFont failed）→ setFont("宋体") 每行文字抛一次异常且被吞 →
+    退回 Helvetica 画中文（无字形 → 文字整片消失），异常构造与日志开销
+    约 0.82s/行（16KB 文本型 OFD 实测 41 秒）。
+
+    修复：把系统自带 CJK 字体以「宋体」名字注册进 reportlab，draw_chars
+    的 setFont 直接命中——既恢复字形（实测汉字 96/96 全对），又消除逐行
+    异常（实测 41s → 0.79s）。文档自带嵌入字体的路径不受影响（走另一条
+    font_tool 分支）。
+    """
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    # 进程内已注册过则跳过（幂等，防止重复注册互相覆盖）
+    try:
+        pdfmetrics.getFont("宋体")
+        return
+    except KeyError:
+        pass
+
+    for path in _CJK_FONT_CANDIDATES:
+        if not os.path.exists(path):
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont("宋体", path))
+            logger.info(
+                f"已应用 easyofd 字体补丁（系统 CJK 字体 {os.path.basename(path)} 占名「宋体」）"
+            )
+            return
+        except Exception as e:
+            logger.warning(f"easyofd 字体补丁注册失败 {path}: {e}")
+    logger.warning("easyofd 字体补丁未生效：系统未找到可用 CJK 字体文件")
+
+
 _patch_easyofd_signature_assert()
 _patch_easyofd_cmp_offset()
+_patch_easyofd_font()
 
 
 def _is_plain_rect(abbr: str) -> bool:

@@ -145,106 +145,117 @@ class InvoiceMerger:
 
         all_pages: List[fitz.Page] = []
         docs: List[fitz.Document] = []
-        for info in self._infos:
-            doc = fitz.open(info.path)
-            docs.append(doc)
-            for page in doc:
-                all_pages.append(page)
+        try:
+            for info in self._infos:
+                doc = fitz.open(info.path)
+                docs.append(doc)
+                for page in doc:
+                    all_pages.append(page)
 
-        total_pages = math.ceil(len(all_pages) / per_page)
-        rendered_images: List[Image.Image] = []
+            total_pages = math.ceil(len(all_pages) / per_page)
+            rendered_images: List[Image.Image] = []
 
-        for page_idx in range(total_pages):
-            canvas = Image.new("RGB", (w_px, h_px), "white")
-            draw = ImageDraw.Draw(canvas)
+            for page_idx in range(total_pages):
+                canvas = Image.new("RGB", (w_px, h_px), "white")
+                draw = ImageDraw.Draw(canvas)
 
-            chunk = all_pages[page_idx * per_page : (page_idx + 1) * per_page]
-            for slot_idx, page in enumerate(chunk):
-                col = slot_idx % cols
-                row = slot_idx // cols
-                if paste:
-                    x = content_x + col * (slot_w + gap_px)
-                else:
-                    x = content_x + col * (slot_w + gap_px) + (binding_px if binding_mm > 0 else 0)
-                y = margin_px + row * (slot_h + gap_px)
+                chunk = all_pages[page_idx * per_page : (page_idx + 1) * per_page]
+                for slot_idx, page in enumerate(chunk):
+                    col = slot_idx % cols
+                    row = slot_idx // cols
+                    if paste:
+                        x = content_x + col * (slot_w + gap_px)
+                    else:
+                        x = content_x + col * (slot_w + gap_px) + (binding_px if binding_mm > 0 else 0)
+                    y = margin_px + row * (slot_h + gap_px)
 
-                # Render page to image at 300 DPI
-                mat = fitz.Matrix(300 / 72, 300 / 72)
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                pix = None  # 及时释放像素缓冲（26MB/页级别）
+                    # Render page to image at 300 DPI
+                    mat = fitz.Matrix(300 / 72, 300 / 72)
+                    pix = page.get_pixmap(matrix=mat, alpha=False)
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    pix = None  # 及时释放像素缓冲（26MB/页级别）
 
-                # paste_sheet 的 2 张档：发票旋转 90° 竖贴（内容正向可读）
-                if rotate_deg:
-                    img = img.rotate(rotate_deg, expand=True)
+                    # paste_sheet 的 2 张档：发票旋转 90° 竖贴（内容正向可读）
+                    if rotate_deg:
+                        img = img.rotate(rotate_deg, expand=True)
 
-                # Fit to slot preserving aspect
-                iw, ih = img.size
-                ratio = iw / ih
-                slot_ratio = slot_w / slot_h
-                if ratio > slot_ratio:
-                    new_w = int(slot_w)
-                    new_h = int(new_w / ratio)
-                else:
-                    new_h = int(slot_h)
-                    new_w = int(new_h * ratio)
-                if new_w > 0 and new_h > 0:
+                    # Fit to slot preserving aspect
+                    iw, ih = img.size
+                    ratio = iw / ih
+                    slot_ratio = slot_w / slot_h
+                    if ratio > slot_ratio:
+                        new_w = int(slot_w)
+                        new_h = int(new_w / ratio)
+                    else:
+                        new_h = int(slot_h)
+                        new_w = int(new_h * ratio)
+                    if new_w > 0 and new_h > 0:
+                        try:
+                            img = img.resize((new_w, new_h), Image.LANCZOS)
+                        except AttributeError:
+                            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+                    paste_x = int(x + (slot_w - new_w) / 2)
+                    paste_y = int(y + (slot_h - new_h) / 2)
+                    canvas.paste(img, (paste_x, paste_y))
+
+                    # Crop marks
+                    if crop_marks:
+                        mark = max(8, int(3 / 25.4 * 300))
+                        # Top-left
+                        draw.line([(paste_x, paste_y - mark), (paste_x, paste_y)], fill="#aaaaaa", width=1)
+                        draw.line([(paste_x - mark, paste_y), (paste_x, paste_y)], fill="#aaaaaa", width=1)
+                        # Top-right
+                        draw.line([(paste_x + new_w, paste_y - mark), (paste_x, paste_y)], fill="#aaaaaa", width=1)
+                        draw.line([(paste_x + new_w, paste_y), (paste_x + new_w + mark, paste_y)], fill="#aaaaaa", width=1)
+                        # Bottom-left
+                        draw.line([(paste_x, paste_y + new_h), (paste_x, paste_y + new_h + mark)], fill="#aaaaaa", width=1)
+                        draw.line([(paste_x - mark, paste_y + new_h), (paste_x, paste_y + new_h)], fill="#aaaaaa", width=1)
+                        # Bottom-right
+                        draw.line([(paste_x + new_w, paste_y + new_h), (paste_x + new_w, paste_y + new_h + mark)], fill="#aaaaaa", width=1)
+                        draw.line([(paste_x + new_w, paste_y + new_h), (paste_x + new_w + mark, paste_y + new_h)], fill="#aaaaaa", width=1)
+
+                # Page number
+                if page_numbers:
+                    text = f"{page_idx + 1} / {total_pages}"
                     try:
-                        img = img.resize((new_w, new_h), Image.LANCZOS)
-                    except AttributeError:
-                        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-                paste_x = int(x + (slot_w - new_w) / 2)
-                paste_y = int(y + (slot_h - new_h) / 2)
-                canvas.paste(img, (paste_x, paste_y))
-
-                # Crop marks
-                if crop_marks:
-                    mark = max(8, int(3 / 25.4 * 300))
-                    # Top-left
-                    draw.line([(paste_x, paste_y - mark), (paste_x, paste_y)], fill="#aaaaaa", width=1)
-                    draw.line([(paste_x - mark, paste_y), (paste_x, paste_y)], fill="#aaaaaa", width=1)
-                    # Top-right
-                    draw.line([(paste_x + new_w, paste_y - mark), (paste_x + new_w, paste_y)], fill="#aaaaaa", width=1)
-                    draw.line([(paste_x + new_w, paste_y), (paste_x + new_w + mark, paste_y)], fill="#aaaaaa", width=1)
-                    # Bottom-left
-                    draw.line([(paste_x, paste_y + new_h), (paste_x, paste_y + new_h + mark)], fill="#aaaaaa", width=1)
-                    draw.line([(paste_x - mark, paste_y + new_h), (paste_x, paste_y + new_h)], fill="#aaaaaa", width=1)
-                    # Bottom-right
-                    draw.line([(paste_x + new_w, paste_y + new_h), (paste_x + new_w, paste_y + new_h + mark)], fill="#aaaaaa", width=1)
-                    draw.line([(paste_x + new_w, paste_y + new_h), (paste_x + new_w + mark, paste_y + new_h)], fill="#aaaaaa", width=1)
-
-            # Page number
-            if page_numbers:
-                text = f"{page_idx + 1} / {total_pages}"
-                try:
-                    font = ImageFont.truetype("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 30)
-                except Exception:
-                    try:
-                        font = ImageFont.truetype("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 30)
+                        font = ImageFont.truetype("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 30)
                     except Exception:
-                        font = ImageFont.load_default()
-                bbox = draw.textbbox((0, 0), text, font=font)
-                tw = bbox[2] - bbox[0]
-                draw.text(((w_px - tw) / 2, h_px - margin_px + 10), text, fill="#666666", font=font)
+                        try:
+                            font = ImageFont.truetype("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 30)
+                        except Exception:
+                            font = ImageFont.load_default()
+                    bbox = draw.textbbox((0, 0), text, font=font)
+                    tw = bbox[2] - bbox[0]
+                    draw.text(((w_px - tw) / 2, h_px - margin_px + 10), text, fill="#666666", font=font)
 
-            rendered_images.append(canvas)
+                rendered_images.append(canvas)
 
-        # Save as multi-page PDF
-        if rendered_images:
-            first = rendered_images[0].convert("RGB")
-            rest = [im.convert("RGB") for im in rendered_images[1:]]
-            first.save(
-                output_path,
-                "PDF",
-                resolution=300.0,
-                save_all=True,
-                append_images=rest,
-            )
+            # Save as multi-page PDF（流式写盘：逐页弹出画布、边转边编码，
+            # 峰值内存从「全量画布 + 全量转换副本 ≈ 2×26MB×页数」降为 O(1) 页。
+            # 2026-10-08 香港 OOM 事故根因之一；PIL 的 append_images 接受任意
+            # 可迭代对象，PdfImagePlugin 用 itertools.chain 惰性逐个消费）
+            if rendered_images:
+                first = rendered_images.pop(0).convert("RGB")
 
-        # Cleanup docs
-        for doc in docs:
-            doc.close()
+                def _remaining_canvases():
+                    while rendered_images:
+                        yield rendered_images.pop(0).convert("RGB")
+
+                first.save(
+                    output_path,
+                    "PDF",
+                    resolution=300.0,
+                    save_all=True,
+                    append_images=_remaining_canvases(),
+                )
+        finally:
+            # 异常路径也必须关闭文档（旧实现仅在正常返回时关闭）
+            for doc in docs:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
 
         return {
             "invoices_count": len(all_pages),
