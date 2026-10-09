@@ -230,9 +230,100 @@ def _patch_easyofd_font() -> None:
     logger.warning("easyofd 字体补丁未生效：系统未找到可用 CJK 字体文件")
 
 
+def _patch_easyofd_fetch_cell_info() -> None:
+    """
+    修复 easyofd==20260427 fetch_cell_info 对 Clips/Boundary 的两类崩溃。
+
+    背景（2026-10-09 全量样本扫描：349/353 成功，4 个真实用户 OFD 失败，
+    全部崩在 easyofd/parser_ofd/file_content_parser.py fetch_cell_info）：
+      1. `row.get('ofd:Clips', {}).get(...)` —— 当 TextObject 的 Clips 含
+         多个 Clip 子元素时，xml.etree 解析结果为 **list**，代码假设 dict，
+         `.get` 直接 AttributeError（'list' object has no attribute 'get'）；
+      2. `float(pos_i)` 对 Boundary/Clips 点串中的空段（连续空格/尾部空格）
+         抛 ValueError("could not convert string to float: ''")。
+
+    修复：monkeypatch 防御版—— Clips 为 list 时取第一个 dict 元素、
+    全部数值解析过滤空段并逐项容错、CGTransform 链式取值防御。
+    字段输出与原版完全一致，正常文档行为不变。
+    """
+    try:
+        from easyofd.parser_ofd.file_content_parser import ContentFileParser
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"easyofd ContentFileParser 导入失败，跳过 fetch_cell_info 补丁: {e}")
+        return
+
+    if getattr(ContentFileParser.fetch_cell_info, "_ipdftoo_patched", False):
+        return
+
+    def _safe_get(obj, key, default=None):
+        """dict 才 .get；list 取第一个 dict 元素再 .get；其余返回 default。"""
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        if isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, dict) and key in item:
+                    return item.get(key, default)
+            return default
+        return default
+
+    def _floats(s):
+        out = []
+        for tok in (s or "").split():
+            try:
+                out.append(float(tok))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def fetch_cell_info_safe(self, row, TextObject):
+        cell_d = {}
+        cell_d["ID"] = row.get("@ID")
+        cg = row.get("ofd:CGTransform")
+        if cg and isinstance(cg, dict):
+            glyphs = _safe_get(cg, "ofd:Glyphs")
+            cell_d["Glyphs_d"] = {
+                "Glyphs": glyphs,
+                "GlyphCount": _safe_get(cg, "@GlyphCount"),
+                "CodeCount": _safe_get(cg, "@CodeCount"),
+                "CodePosition": _safe_get(cg, "@CodePosition"),
+            }
+
+        cell_d["pos"] = _floats(row.get("@Boundary", ""))
+        clips = _safe_get(row, "ofd:Clips")
+        clip = _safe_get(clips, "ofd:Clip")
+        area = _safe_get(clip, "ofd:Area")
+        path = _safe_get(area, "ofd:Path")
+        if isinstance(path, dict):
+            cell_d["clips_pos"] = _floats(path.get("@Boundary", ""))
+
+        text_val = TextObject.get("#text") if isinstance(TextObject, dict) else None
+        cell_d["text"] = str(text_val)
+        cell_d["font"] = row.get("@Font")
+        try:
+            cell_d["size"] = float(row.get("@Size"))
+        except (TypeError, ValueError):
+            cell_d["size"] = 0.0
+
+        color = self.ofd_param("ofd:FillColor", row)
+        color_val = color.get("@Value", "") if isinstance(color, dict) else ""
+        cell_d["color"] = tuple(color_val.split(" "))
+
+        cell_d["DeltaY"] = TextObject.get("@DeltaY", "") if isinstance(TextObject, dict) else ""
+        cell_d["DeltaX"] = TextObject.get("@DeltaX", "") if isinstance(TextObject, dict) else ""
+        cell_d["CTM"] = row.get("@CTM", "")
+        cell_d["X"] = TextObject.get("@X", "") if isinstance(TextObject, dict) else ""
+        cell_d["Y"] = TextObject.get("@Y", "") if isinstance(TextObject, dict) else ""
+        return cell_d
+
+    fetch_cell_info_safe._ipdftoo_patched = True
+    ContentFileParser.fetch_cell_info = fetch_cell_info_safe
+    logger.info("已应用 easyofd fetch_cell_info 补丁（Clips list/空段容错）")
+
+
 _patch_easyofd_signature_assert()
 _patch_easyofd_cmp_offset()
 _patch_easyofd_font()
+_patch_easyofd_fetch_cell_info()
 
 
 def _is_plain_rect(abbr: str) -> bool:
