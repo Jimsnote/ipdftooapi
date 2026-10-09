@@ -75,10 +75,11 @@ class TestPoolDestroyDefensive:
 
 class TestEasyofdFontPatch:
     def test_patch_registers_songti_with_candidate_font(self, tmp_path, monkeypatch):
-        """给定可用字体文件时，「宋体」应被注册进 reportlab。"""
+        """给定通过双覆盖自检的字体文件时，「宋体」应被注册进 reportlab。"""
         import shutil
 
-        # 找一个本机真实 TTF 复制为候选（避开对系统字体分布的硬依赖）
+        # 找一个本机真实 TTF 复制为候选（避开对系统字体分布的硬依赖）；
+        # 自检用 monkeypatch 强制通过（本机字体不保证 ASCII+CJK 双覆盖）
         sources = [
             r"C:\Windows\Fonts\arial.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -90,6 +91,7 @@ class TestEasyofdFontPatch:
         ttf = tmp_path / "fake-cjk.ttf"
         shutil.copyfile(src, str(ttf))
         monkeypatch.setattr(ofd_converter_mod, "_CJK_FONT_CANDIDATES", [str(ttf)])
+        monkeypatch.setattr(ofd_converter_mod, "_font_covers_ascii_cjk", lambda p: True)
 
         from reportlab.pdfbase import pdfmetrics
 
@@ -99,10 +101,39 @@ class TestEasyofdFontPatch:
         font_obj = pdfmetrics.getFont("宋体")  # 不抛 KeyError 即注册成功
         assert font_obj is not None
 
+    def test_font_covers_ascii_cjk_rejects_latin_only(self, tmp_path):
+        """自检应拒绝仅有 ASCII 无 CJK 的字体（如 DejaVu/Arial）。"""
+        import shutil
+
+        sources = [
+            r"C:\Windows\Fonts\arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ]
+        src = next((s for s in sources if os.path.exists(s)), None)
+        if not src:
+            pytest.skip("本环境无可用 TTF 字体文件")
+        ttf = tmp_path / "latin-only.ttf"
+        shutil.copyfile(src, str(ttf))
+        assert ofd_converter_mod._font_covers_ascii_cjk(str(ttf)) is False
+
+    def test_droid_sans_fallback_rejected_by_self_check(self):
+        """回归（2026-10-09 航空行程单）：DroidSansFallback 仅含 CJK 无 ASCII，
+        必须被自检拒绝，否则西文/数字整片画空。服务器路径不存在时跳过。"""
+        for p in (
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf",
+        ):
+            if os.path.exists(p):
+                assert ofd_converter_mod._font_covers_ascii_cjk(p) is False
+                return
+        pytest.skip("本环境无 DroidSansFallback 字体")
+
     def test_patch_idempotent_no_raise(self):
         """重复调用补丁不抛错（进程内幂等）。"""
         ofd_converter_mod._patch_easyofd_font()
         ofd_converter_mod._patch_easyofd_font()
+
 
 
 # ---------------------------------------------------------------------------

@@ -123,14 +123,37 @@ def _patch_easyofd_cmp_offset() -> None:
     logger.info("已应用 easyofd 字距缩放补丁（g 分支乘 CTM resize）")
 
 
-# Linux 系统自带 CJK 字体候选（按优先级）；测试可 monkeypatch 此常量
+# Linux 系统自带 CJK 字体候选（按优先级）；测试可 monkeypatch 此常量。
+# 注意：候选必须通过 _font_covers_ascii_cjk 自检（ASCII+CJK 双覆盖）才会被采用；
+# DroidSansFallback 系列仅含 CJK 字形（实测 M/5 无字形），只作最后兜底。
 _CJK_FONT_CANDIDATES = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
     "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf",
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
 ]
+
+
+def _font_covers_ascii_cjk(path: str) -> bool:
+    """
+    检查字体文件是否同时覆盖 ASCII 与 CJK 基础字形。
+
+    背景（2026-10-09 航空行程单缺陷）：首版补丁选用 DroidSansFallbackFull，
+    它只含 CJK 字形（M=0、5=0），导致 OFD 中 Courier New 等西文字体声明的
+    数字/字母文本（MU5702、CNY 2900.00 等）fallback 到该字体后整片画空——
+    中文恢复了、西文丢了，缺陷被"反转"。本自检确保补丁字体同时含
+    'M'（大写字母）、'5'（数字）、'中'（汉字）三个代表字形。
+    """
+    try:
+        from reportlab.pdfbase.ttfonts import TTFontFile
+
+        tt = TTFontFile(path, subfontIndex=0)
+        cmap = getattr(tt, "charToGlyph", {}) or {}
+        return all(ord(ch) in cmap for ch in "M5中")
+    except Exception as e:
+        logger.warning(f"easyofd 字体补丁字形自检失败 {path}: {e}")
+        return False
 
 
 def _patch_easyofd_font() -> None:
@@ -149,6 +172,11 @@ def _patch_easyofd_font() -> None:
     的 setFont 直接命中——既恢复字形（实测汉字 96/96 全对），又消除逐行
     异常（实测 41s → 0.79s）。文档自带嵌入字体的路径不受影响（走另一条
     font_tool 分支）。
+
+    二期修复（2026-10-09 航空行程单）：候选字体必须通过
+    _font_covers_ascii_cjk 双覆盖自检——DroidSansFallback 仅含 CJK 无
+    ASCII 字形，用它占名「宋体」后，文档中 Courier New / Times New Roman
+    等西文声明字体的数字与字母（航班号、金额、票号）全部渲染为空白。
     """
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
@@ -160,17 +188,35 @@ def _patch_easyofd_font() -> None:
     except KeyError:
         pass
 
-    for path in _CJK_FONT_CANDIDATES:
-        if not os.path.exists(path):
+    # 第一轮：只接受 ASCII+CJK 双覆盖的字体
+    existing = [p for p in _CJK_FONT_CANDIDATES if os.path.exists(p)]
+    for path in existing:
+        if not _font_covers_ascii_cjk(path):
+            logger.warning(
+                f"easyofd 字体补丁跳过 {os.path.basename(path)}：字形自检未通过（缺 ASCII 或 CJK 字形）"
+            )
             continue
         try:
             pdfmetrics.registerFont(TTFont("宋体", path))
             logger.info(
-                f"已应用 easyofd 字体补丁（系统 CJK 字体 {os.path.basename(path)} 占名「宋体」）"
+                f"已应用 easyofd 字体补丁（系统 CJK 字体 {os.path.basename(path)} 占名「宋体」，"
+                "ASCII+CJK 双覆盖已自检）"
             )
             return
         except Exception as e:
             logger.warning(f"easyofd 字体补丁注册失败 {path}: {e}")
+
+    # 第二轮兜底：全部自检失败时仍注册第一个存在的候选（宁可丢西文也别整页空白/逐行异常）
+    for path in existing:
+        try:
+            pdfmetrics.registerFont(TTFont("宋体", path))
+            logger.warning(
+                f"easyofd 字体补丁降级：{os.path.basename(path)} 未通过双覆盖自检但无更好候选，"
+                "仍占名「宋体」（西文字符可能渲染为空白）"
+            )
+            return
+        except Exception:
+            continue
     logger.warning("easyofd 字体补丁未生效：系统未找到可用 CJK 字体文件")
 
 
