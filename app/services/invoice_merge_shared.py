@@ -20,6 +20,7 @@ from app.services.ofd_converter import OFDConverter
 from app.services.ofd_validator import (  # noqa: F401  normalize_pdf 2026-09-08 上移至 ofd_validator，此处保留导出兼容
     OfdEncryptedError,
     OfdFileError,
+    convert_ofd_to_pdf,
     normalize_pdf,
     validate_ofd_zip,
 )
@@ -98,3 +99,61 @@ def cleanup_intermediate(task_dir: str) -> None:
                 os.remove(os.path.join(task_dir, fn))
             except OSError:
                 pass
+
+
+async def convert_ofd_batch_async(
+    task_dir: str,
+    ofd_items: List[Tuple[int, str]],
+    original_names: List[str],
+) -> None:
+    """async 版批量转换（2026-10-09 对抗审查 P1-6）：单文件转换走进程池。
+
+    与同步版 convert_ofd_batch 的差异：
+      - 转换经 ofd_validator.convert_ofd_to_pdf 执行——复用 /ofd-to-pdf 的
+        全部防护设施：进程池隔离（easyofd 硬崩溃只死 worker）、60s 超时、
+        超时真取消、Semaphore 全局并发限制（2026-10-09 起 = gunicorn
+        workers 数）。
+      - 旧实现（同步版）在 API worker 进程内直接跑 easyofd：损坏文件可
+        长时间占住 OFD_INVOICE_LOCK（最坏永久），无超时、无进程隔离。
+      - 并发控制不再依赖进程内线程锁（跨 gunicorn worker 无效），交给
+        convert_ofd_to_pdf 内部的信号量。
+      - normalize 由 _convert_job 内联完成（crop=True，与旧版语义一致），
+        产物直接落 invoice_NNN.pdf。
+
+    :param ofd_items: [(全局 0 基序号, OFD 路径)]，与同步版约定一致
+    :raises HTTPException: 预扫描拦截 400 / 转换失败或超时 400（fail-fast，
+              整批失败并清理中间产物）
+    """
+    for item_index, (global_idx, ofd_path) in enumerate(ofd_items):
+        idx = global_idx + 1
+        name = (
+            original_names[item_index]
+            if item_index < len(original_names)
+            else f"第 {idx} 个文件"
+        )
+        # zip 预扫描：与同步版同一校验（zip bomb / 加密 / 伪造中央目录）
+        try:
+            validate_ofd_zip(ofd_path)
+        except OfdEncryptedError:
+            cleanup_intermediate(task_dir)
+            raise HTTPException(
+                status_code=400,
+                detail=f"第 {idx} 个文件「{name}」已加密，请先解密后重试。",
+            )
+        except OfdFileError as e:
+            cleanup_intermediate(task_dir)
+            logger.info(f"OFD 预扫描拦截（第 {idx} 个文件 {name}）: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"第 {idx} 个文件「{name}」不是有效的 OFD 文件，请确认是税务系统开具的 OFD 版式发票。",
+            )
+
+        final_pdf = os.path.join(task_dir, f"invoice_{idx:03d}.pdf")
+        ok, msg = await convert_ofd_to_pdf(ofd_path, final_pdf, crop=True)
+        if not ok:
+            logger.error(f"OFD 转换失败（第 {idx} 个文件 {name}）: {msg}")
+            cleanup_intermediate(task_dir)
+            raise HTTPException(
+                status_code=400,
+                detail=f"第 {idx} 个文件「{name}」无法解析，请确认是税务系统开具的 OFD 版式发票。",
+            )

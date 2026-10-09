@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 
 from app.models.schemas import TaskResponse
 from app.services.invoice_merger import InvoiceMerger
-from app.services.invoice_merge_shared import OFD_INVOICE_LOCK, convert_ofd_batch
+from app.services.invoice_merge_shared import convert_ofd_batch_async
 from app.core.errors import friendly_detail
 from app.core.logger import get_logger
 from app.core.file_security import get_task_dir, make_task_dir, safe_join, save_upload_file
@@ -85,20 +85,20 @@ async def analyze_invoices(
             saved_paths.append(path)
         original_names.append(f.filename or f"invoice_{index + 1:03d}.pdf")
 
-    # OFD 批量转换（fail-fast；锁内防 2GB 服务器 OOM）。
+    # OFD 批量转换（fail-fast）。
+    # 2026-10-09 对抗审查 P1-6：改走 convert_ofd_batch_async——单文件转换
+    # 经进程池（隔离 easyofd 崩溃 + 60s 超时 + 真取消），并发控制交给
+    # ofd_validator 的信号量（跨 worker 生效）。旧实现（线程内同步跑
+    # easyofd + 进程内线程锁）在损坏文件上可长期占死锁与线程。
     # 产物直接命名为 invoice_NNN.pdf（NNN = 该 OFD 的全局上传序号+1），
     # 与 PDF 直存命名空间对齐——审计 #1 修复：连续编号在混合序列下会覆盖直存 PDF。
     if ofd_paths:
         try:
-            with OFD_INVOICE_LOCK:
-                # 审计 #17：OFD→PDF 转换秒级重活放线程池（锁跨 await 持有，
-                # acquire/release 都在事件循环线程，语义不变）
-                await run_in_threadpool(
-                    convert_ofd_batch,
-                    task_dir,
-                    ofd_paths,
-                    [original_names[i] for i, _ in ofd_paths],
-                )
+            await convert_ofd_batch_async(
+                task_dir,
+                ofd_paths,
+                [original_names[i] for i, _ in ofd_paths],
+            )
         except HTTPException:
             raise
         except Exception as e:

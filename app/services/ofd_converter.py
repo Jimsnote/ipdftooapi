@@ -100,8 +100,18 @@ def _patch_easyofd_cmp_offset() -> None:
             for _no, offset_i in enumerate(offsets):
                 if offset_i == "g":
                     g_no = _no
-                    for _ in range(int(offsets[g_no + 1])):
-                        char_pos += float(offsets[g_no + 2]) * resize
+                    # 越界保护（对抗审查 P1-2）：损坏/恶意 OFD 的 DeltaRule
+                    # 可以 "g" 结尾或参数不足，直接取 offsets[g_no+1/+2] 会
+                    # IndexError 使 to_pdf 整体失败；参数不足时按无字距处理
+                    if g_no + 2 >= len(offsets):
+                        continue
+                    try:
+                        repeat = int(offsets[g_no + 1])
+                        gap = float(offsets[g_no + 2])
+                    except ValueError:
+                        continue
+                    for _ in range(max(0, repeat)):
+                        char_pos += gap * resize
                         pos_list.append(char_pos)
                 elif offset_i and offset_i != "g":
                     if g_no is None:

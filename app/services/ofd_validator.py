@@ -10,9 +10,12 @@
 - 并发限制：Semaphore(2) + 线程池执行 CPU 密集转换，修复原 /ofd-to-pdf
   在 async def 内同步调用导致的整个事件循环阻塞。
 
-⚠ 单 worker 前提（写死）：asyncio.Semaphore 是进程级的，uvicorn 多 worker
-下实际并发 = 2 × workers 数。当前部署为单 worker；扩容 worker 前必须重估
-并发上限与内存预算（200MB 解压上限与并发 2 为联动参数）。
+⚠ 多 worker 语义（2026-10-09 更新，gunicorn workers 1→2 后重估）：
+asyncio.Semaphore 是进程级的，gunicorn --workers 2 下每个 API worker 各有
+一份 Semaphore 与各自的转换进程池。本值从 2 收紧为 1：全局转换并发上限 =
+1 × workers 数 = 2 个转换进程，与旧单 worker × 2 的内存预算持平（200MB
+解压上限 × 并发为联动参数）。invoice 合并链路的进程内线程锁
+（OFD_INVOICE_LOCK）跨 worker 无效，并发控制以本信号量为准。
 """
 
 import asyncio
@@ -55,8 +58,10 @@ CROP_PAD_PT = 6.0
 # 裁剪判定的包围盒最小宽度（pt）：过小的包围盒多为杂点，不值得裁剪
 CROP_MIN_BBOX_WIDTH = 20.0
 
-# 单 worker 前提下的进程级并发上限
-_CONCURRENCY = 2
+# 每 worker 进程的转换并发上限（全局上限 = 本值 × gunicorn workers 数；
+# 2026-10-09 workers 1→2 后从 2 收紧为 1，全局转换并发保持 2 不变，
+# 内存预算与旧单 worker × 2 方案持平）
+_CONCURRENCY = 1
 _semaphore = asyncio.Semaphore(_CONCURRENCY)
 
 
