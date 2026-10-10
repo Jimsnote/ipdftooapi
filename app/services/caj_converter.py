@@ -24,8 +24,12 @@ from app.core.logger import get_logger
 logger = get_logger(__name__)
 
 CAJ_EXTENSIONS = (".caj", ".kdh", ".hn")
-MAX_CAJ_SIZE = 200 * 1024 * 1024  # 200MB，对齐竞品上限
+MAX_CAJ_SIZE = 100 * 1024 * 1024  # 100MB（大 CAJ 的 JBIG 解码内存峰值未压测，
+                                  # 首版保守对齐 iloveofd 免费档；压测后再放宽）
 CONVERT_TIMEOUT_SECONDS = 120
+
+# 并发限制（对抗自查：与 OFD 转换防护对齐，防止多个大文件解码内存峰值叠加）
+_SEM = asyncio.Semaphore(1)
 
 _VENDOR_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "vendor", "caj2pdf")
@@ -140,9 +144,10 @@ async def convert_caj_to_pdf(
 
     # CAJ / C8 / HN → caj2pdf 子进程转换
     loop = asyncio.get_running_loop()
-    ok, msg = await loop.run_in_executor(
-        None, _run_convert, input_path, output_path
-    )
+    async with _SEM:
+        ok, msg = await loop.run_in_executor(
+            None, _run_convert, input_path, output_path
+        )
     if not ok:
         return False, msg, ftype
 
