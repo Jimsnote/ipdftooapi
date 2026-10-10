@@ -15,6 +15,7 @@ CAJ 后缀内部的格式分层（实测 + caj2pdf 项目 Wiki）：
 
 import asyncio
 import os
+import sys
 import shutil
 import subprocess
 from typing import Optional, Tuple
@@ -32,7 +33,7 @@ CONVERT_TIMEOUT_SECONDS = 120
 _SEM = asyncio.Semaphore(1)
 
 _VENDOR_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "vendor", "caj2pdf")
+    os.path.join(os.path.dirname(__file__), "..", "..", "vendor", "caj2pdf")
 )
 _CAJ_CLI = os.path.join(_VENDOR_DIR, "caj2pdf")
 
@@ -74,7 +75,7 @@ def _run_convert(input_path: str, output_path: str) -> Tuple[bool, str]:
     try:
         proc = subprocess.run(
             [
-                "python3",
+                sys.executable,  # venv 解释器（PyPDF2==1.28.6 装在 venv 内）
                 _CAJ_CLI,
                 "convert",
                 input_path,

@@ -89,6 +89,18 @@ def validate_file_header(file: UploadFile, suffix: str) -> None:
         # RIFF 容器 + 偏移 8 的 WEBP 标识（OCR 扫描件链路支持 webp）
         if not (header.startswith(b"RIFF") and len(header) >= 12 and header[8:12] == b"WEBP"):
             raise InvalidFileTypeError()
+    elif suffix in {".caj", ".kdh", ".hn"}:
+        # CAJ 家族（docs/CAJ_TO_PDF_DESIGN.md）：内部格式多样，白名单放行已知
+        # 合法头（%PDF 伪后缀 / C8 / CAJ / HN / KDH），深检交给 detect_caj_type
+        allowed = (
+            header.startswith(b"%PDF")
+            or header[:1] == b"\xc8"
+            or b"CAJ" in header[:20]
+            or b"HN" in header[:20]
+            or header[:3] == b"KDH"
+        )
+        if not allowed:
+            raise InvalidFileTypeError()
     else:
         raise InvalidFileTypeError()
 
