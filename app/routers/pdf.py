@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 
 from app.config import settings
 from app.models.schemas import TaskResponse
+from app.services.caj_converter import CAJ_EXTENSIONS, MAX_CAJ_SIZE, convert_caj_to_pdf
 from app.services.pdf_splitter import PDFSplitter
 from app.services.pdf_merger import PDFMerger
 from app.services.pdf_compressor import PDFCompressor
@@ -1394,3 +1395,46 @@ def _derive_download_name(download_name: str, original_stem: str | None) -> str:
     if base in _GENERIC_OUTPUT_STEMS:
         return original_stem + Path(download_name).suffix
     return download_name
+
+
+@router.post("/caj-to-pdf", response_model=TaskResponse, summary="Convert a CAJ file to PDF")
+async def caj_to_pdf(file: UploadFile = File(...)):
+    """CAJ（知网文献）转 PDF。支持内部类型：PDF 伪后缀 / CAJ / C8 / HN；KDH 等暂不支持。
+
+    docs/CAJ_TO_PDF_DESIGN.md：阶段 0 样本实测 6/6；转换内核为 vendored caj2pdf
+    （GLWTPL），子进程隔离 + 120s 超时，产物强校验。
+    """
+    if file.size and file.size > MAX_CAJ_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过大小限制（最大 {MAX_CAJ_SIZE // (1024 * 1024)}MB）",
+        )
+    suffix = validate_extension(file.filename, CAJ_EXTENSIONS)
+    task_id, task_dir = make_task_dir(TEMP_DIR)
+
+    input_path = save_upload_by_type(file, task_dir, "input.caj", CAJ_EXTENSIONS)
+
+    try:
+        output_path = safe_join(task_dir, "converted.pdf")
+        success, result, caj_type = await convert_caj_to_pdf(input_path, output_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"CAJ-to-PDF task {task_id} failed: {e!r}")
+        raise_processing_error(e)
+
+    if not success:
+        logger.error(f"CAJ-to-PDF task {task_id} rejected/failed: type={caj_type} msg={result}")
+        raise HTTPException(status_code=422, detail=f"CAJ 转换失败：{result}")
+
+    download_url = f"/api/v1/pdf/download/{task_id}"
+    logger.info(
+        f"CAJ-to-PDF task {task_id} completed: type={caj_type} file={file.filename}"
+    )
+    return TaskResponse(
+        task_id=task_id,
+        status="completed",
+        message="CAJ 文件已成功转换为 PDF",
+        download_url=download_url,
+        file_count=1,
+    )
