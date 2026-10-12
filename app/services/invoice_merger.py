@@ -206,7 +206,10 @@ class InvoiceMerger:
                         draw.line([(paste_x, paste_y - mark), (paste_x, paste_y)], fill="#aaaaaa", width=1)
                         draw.line([(paste_x - mark, paste_y), (paste_x, paste_y)], fill="#aaaaaa", width=1)
                         # Top-right
-                        draw.line([(paste_x + new_w, paste_y - mark), (paste_x, paste_y)], fill="#aaaaaa", width=1)
+                        # 修复：竖向标记终点原误写为 (paste_x, paste_y)——从右上角
+                        # 画一条横穿整页的对角斜线到左上角（用户 10-12 实报：
+                        # 合并产物顶部出现斜线）。终点应为右上角 (paste_x+new_w, paste_y)
+                        draw.line([(paste_x + new_w, paste_y - mark), (paste_x + new_w, paste_y)], fill="#aaaaaa", width=1)
                         draw.line([(paste_x + new_w, paste_y), (paste_x + new_w + mark, paste_y)], fill="#aaaaaa", width=1)
                         # Bottom-left
                         draw.line([(paste_x, paste_y + new_h), (paste_x, paste_y + new_h + mark)], fill="#aaaaaa", width=1)
