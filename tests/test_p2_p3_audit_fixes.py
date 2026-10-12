@@ -108,13 +108,13 @@ class TestEventLoopOffload:
             assert inspect.iscoroutinefunction(fn)
             assert "run_in_threadpool" in inspect.getsource(fn)
 
-    def test_ofd_invoice_convert_under_lock_offloaded(self):
+    def test_ofd_invoice_convert_async_native(self):
+        # 2026-10-09 对抗审查 P1-6：转换改走 convert_ofd_batch_async（进程池隔离
+        # easyofd 崩溃 + 60s 超时 + 跨 worker 信号量限并发），不再使用进程内
+        # 线程锁——旧断言（LOCK + run_in_threadpool）随实现更新。
         src = inspect.getsource(invoice_router)
-        assert "OFD_INVOICE_LOCK" in src
-        # 锁内转换必须线程池化（锁住事件循环 = 全站阻塞）
-        assert bool(
-            re.search(r"with\s+OFD_INVOICE_LOCK[\s\S]{0,600}run_in_threadpool", src)
-        )
+        assert "convert_ofd_batch_async" in src
+        assert "OFD_INVOICE_LOCK" not in src
 
 
 # ---------------------------------------------------------------------------
