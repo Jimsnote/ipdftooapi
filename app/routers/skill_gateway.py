@@ -668,12 +668,18 @@ async def skill_invoice(request: Request, background_tasks: BackgroundTasks):
         )
         raise
 
-    body = dict(result_body)
-    body["out_trade_no"] = order.out_trade_no
-    body["trade_no"] = trade_no
-    body["already_fulfilled"] = False
+    # T2 实证（官方 local_402_sandbox_pay 校验器）：200 响应须含非空
+    # resource_id + content 证明资源归属——op 结果整体作为 content 载体
+    body = {
+        "op": order.op,
+        "resource_id": order.resource_id,
+        "content": result_body,
+        "out_trade_no": order.out_trade_no,
+        "trade_no": trade_no,
+        "already_fulfilled": False,
+    }
     store.mark_fulfilled(
-        order.out_trade_no, body.get("task_id"),
+        order.out_trade_no, body["content"].get("task_id"),  # review③ G1：task_id 在 content 载体内（dedup 无此字段→None）
         json.dumps(body, ensure_ascii=False, separators=(",", ":")),
     )
     background_tasks.add_task(run_in_threadpool, _safe_fulfillment_confirm, trade_no)

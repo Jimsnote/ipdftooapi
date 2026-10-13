@@ -276,10 +276,11 @@ class TestHappyPath:
         assert body["already_fulfilled"] is False
         assert body["out_trade_no"] == probe["out_trade_no"]
         assert body["trade_no"] == "T-OK-1"
-        # 查重业务正确性（golden 语义）
-        assert body["summary"] == {"total": 2, "ok": 2, "duplicate": 0,
-                                   "suspicious": 0, "unrecognized": 0}
-        assert len(body["ledgerEntries"]) == 2
+        # T2 实证契约：resource_id 回显 + op 结果整体进 content（资源归属证明）
+        assert body["resource_id"] == probe["resource_id"]
+        assert body["content"]["summary"] == {"total": 2, "ok": 2, "duplicate": 0,
+                                              "suspicious": 0, "unrecognized": 0}
+        assert len(body["content"]["ledgerEntries"]) == 2
         # 异步履约回执已发（TestClient 同步执行 background tasks）
         assert stub.fulfill_calls == ["T-OK-1"]
         # 订单落 fulfilled + result_cache
@@ -532,10 +533,16 @@ class TestRenameDispatch:
         assert r.status_code == 200
         body = r.json()
         assert body["op"] == "rename"
-        assert body["renamed"] == 1
+        assert body["resource_id"] == probe["resource_id"]
+        assert body["content"]["renamed"] == 1
         assert body["already_fulfilled"] is False
         assert captured["count"] == 1
         assert captured["prefix"] == "报销_"
+        # review③ G1：task_id 从 content 载体取，订单审计列不再落空
+        store = skill_gateway._get_order_store()
+        order = store.get_order(probe["out_trade_no"])
+        assert order.task_id == "11111111-2222-3333-4444-555555555555"
+        assert order.status == "fulfilled"
 
 
 # ---------------------------------------------------------------------------

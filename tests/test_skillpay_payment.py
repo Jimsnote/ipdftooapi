@@ -12,6 +12,10 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from app.services.skillpay.alipay_client import (
+    AlipayClient,
+    AlipayGatewayError,
+)
 from app.services.skillpay.payment import (
     CURRENCY,
     PaymentProofError,
@@ -332,3 +336,100 @@ class TestDecodePaymentProof:
         raw = base64.b64encode(b"[1,2,3]").decode()
         with pytest.raises(PaymentProofError):
             decode_payment_proof(raw)
+
+
+# ---------------------------------------------------------------------------
+# 网关响应解释（T2 沙箱实证驱动的行为，alipay_client._interpret_response）
+# ---------------------------------------------------------------------------
+
+_VERIFY_METHOD = "alipay.aipay.agent.payment.verify"
+_VERIFY_NODE_KEY = "alipay_aipay_agent_payment_verify_response"
+
+
+class TestInterpretResponse:
+    """T2 实证（2026-10-13）：
+    1. 业务失败（code!=10000，如 40004/SYSTEM_ERROR）藏在成功节点内；
+    2. 沙箱响应签名无法用交付公钥验证 → sandbox=True 跳过验签；
+    3. 生产模式严格验签（原始子串 + 支付宝公钥，fail-closed）。
+    """
+
+    def _client(self, keypair, *, sandbox=True, with_alipay_key=False):
+        cfg = _cfg(
+            keypair,
+            sandbox=sandbox,
+            alipay_public_key=keypair["public_b64"] if with_alipay_key else "",
+        )
+        return AlipayClient(cfg)
+
+    @staticmethod
+    def _signed_text(keypair, node: dict, *, tamper_sign=False):
+        raw_node = json.dumps(node, separators=(",", ":"), ensure_ascii=False)
+        sign = rsa2_sign(raw_node, keypair["private"])
+        if tamper_sign:
+            sign = ("A" if sign[0] != "A" else "B") + sign[1:]
+        return '{"%s":%s,"sign":"%s"}' % (_VERIFY_NODE_KEY, raw_node, sign)
+
+    def test_business_failure_inside_success_node_raises(self, keypair):
+        """T2 实测响应：40004/SYSTEM_ERROR 在成功节点内 → 必须抛出业务错误。"""
+        client = self._client(keypair, sandbox=True)
+        text = self._signed_text(
+            keypair,
+            {"msg": "Business Failed", "code": "40004", "sub_msg": "系统繁忙", "sub_code": "SYSTEM_ERROR"},
+        )
+        with pytest.raises(AlipayGatewayError) as ei:
+            client._interpret_response(text, _VERIFY_METHOD)
+        assert ei.value.sub_code == "SYSTEM_ERROR"
+        assert ei.value.user_message == "支付宝服务繁忙，请重试（幂等安全）"
+
+    def test_success_node_code_10000_passes(self, keypair):
+        client = self._client(keypair, sandbox=True)
+        node = {
+            "code": "10000", "msg": "Success", "trade_no": "T1",
+            "out_trade_no": "SK" + "1" * 30, "resource_id": "D" + "2" * 31,
+            "amount": "0.01", "active": True,
+        }
+        text = self._signed_text(keypair, node)
+        assert client._interpret_response(text, _VERIFY_METHOD) == node
+
+    def test_sandbox_skips_unverifiable_sign(self, keypair):
+        """沙箱实测：交付的两把公钥都验不了沙箱签名 → sandbox=True 跳过放行。"""
+        client = self._client(keypair, sandbox=True, with_alipay_key=True)
+        node = {"code": "10000", "trade_no": "T1"}
+        text = self._signed_text(keypair, node, tamper_sign=True)  # 故意坏签名
+        assert client._interpret_response(text, _VERIFY_METHOD) == node  # 沙箱不校验
+
+    def test_production_verifies_sign_over_raw_substring(self, keypair):
+        client = self._client(keypair, sandbox=False, with_alipay_key=True)
+        node = {"code": "10000", "trade_no": "T1", "active": True}
+        text = self._signed_text(keypair, node)
+        assert client._interpret_response(text, _VERIFY_METHOD) == node
+
+    def test_production_bad_sign_fails_closed(self, keypair):
+        client = self._client(keypair, sandbox=False, with_alipay_key=True)
+        node = {"code": "10000", "trade_no": "T1"}
+        text = self._signed_text(keypair, node, tamper_sign=True)
+        with pytest.raises(AlipayGatewayError) as ei:
+            client._interpret_response(text, _VERIFY_METHOD)
+        assert ei.value.sub_code == "SIGN_VERIFY_FAILED"
+
+    def test_error_response_raises_with_sub_code(self, keypair):
+        client = self._client(keypair, sandbox=True)
+        text = json.dumps(
+            {"error_response": {"code": "40002", "sub_code": "PAYMENT_PROOF_NOT_FOUND",
+                                 "sub_msg": "凭证不存在"}}
+        )
+        with pytest.raises(AlipayGatewayError) as ei:
+            client._interpret_response(text, _VERIFY_METHOD)
+        assert ei.value.sub_code == "PAYMENT_PROOF_NOT_FOUND"
+
+    def test_not_json_raises(self, keypair):
+        client = self._client(keypair, sandbox=True)
+        with pytest.raises(AlipayGatewayError) as ei:
+            client._interpret_response("<html>bad gateway</html>", _VERIFY_METHOD)
+        assert ei.value.sub_code == "RESPONSE_NOT_JSON"
+
+    def test_missing_node_raises(self, keypair):
+        client = self._client(keypair, sandbox=True)
+        with pytest.raises(AlipayGatewayError) as ei:
+            client._interpret_response(json.dumps({"other_response": {}}), _VERIFY_METHOD)
+        assert ei.value.sub_code == "RESPONSE_NODE_MISSING"

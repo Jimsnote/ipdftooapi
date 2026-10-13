@@ -89,7 +89,7 @@ class AlipayClient:
     # 网关调用
     # ------------------------------------------------------------------
 
-    def _call(self, method: str, biz_content: dict) -> dict:
+    def _call(self, method: str, biz_content: dict, timeout: float = 10.0) -> dict:
         params = {
             "app_id": self.cfg.app_id,
             "method": method,
@@ -104,17 +104,28 @@ class AlipayClient:
         params["sign"] = rsa2_sign(sign_content, self._private_key)
 
         try:
-            with httpx.Client(timeout=10.0) as client:
+            with httpx.Client(timeout=timeout) as client:
                 resp = client.post(self.gateway, data=params)
         except httpx.HTTPError as e:
             raise AlipayGatewayError("NETWORK_ERROR", repr(e)) from e
         if resp.status_code != 200:
             raise AlipayGatewayError("HTTP_%d" % resp.status_code, resp.text[:500])
+        return self._interpret_response(resp.text, method)
 
+    def _interpret_response(self, raw_text: str, method: str) -> dict:
+        """解释网关响应原文（独立方法便于单测）。
+
+        T2 沙箱实证（2026-10-13，temp/t2_debug_verify.py / t2_debug_sign2.py）：
+        1. **业务失败以 `code != 10000` 藏在成功节点内**（实测 40004/SYSTEM_ERROR），
+           顶层 error_response 只承载协议级错误——必须显式检查业务码；
+        2. 沙箱网关的响应签名无法用交付的两把公钥（沙箱支付宝公钥/应用公钥）
+           验证（7 种候选串 × 两把钥匙穷举均败）——沙箱模式跳过验签仅记日志；
+           **生产模式保持严格 fail-closed**（U5 实测复核）。
+        """
         try:
-            payload = json.loads(resp.text)
+            payload = json.loads(raw_text)
         except ValueError as e:
-            raise AlipayGatewayError("RESPONSE_NOT_JSON", resp.text[:500]) from e
+            raise AlipayGatewayError("RESPONSE_NOT_JSON", raw_text[:500]) from e
 
         if "error_response" in payload:
             err = payload["error_response"] or {}
@@ -127,17 +138,29 @@ class AlipayClient:
         if not isinstance(node, dict):
             raise AlipayGatewayError("RESPONSE_NODE_MISSING", f"缺少 {node_key} 节点")
 
-        # 响应验签：sign 缺失时告警放行（沙箱/网关差异留 T2 实测定夺），
-        # 有 sign 且配置了支付宝公钥则严格校验（fail closed）。
+        # 响应验签：sign 缺失告警放行；沙箱跳过（见 docstring 实证）；
+        # 生产有 sign 且配置支付宝公钥则严格校验（fail closed）。
         sign = payload.get("sign")
         if not sign:
             logger.warning("alipay gateway response without sign: method=%s", method)
+        elif self.cfg.sandbox:
+            logger.info(
+                "sandbox mode: skip response sign verification (T2 finding): method=%s",
+                method,
+            )
         elif self._alipay_public_key is not None:
-            raw_node = self._extract_node_raw(resp.text, node_key)
+            raw_node = self._extract_node_raw(raw_text, node_key)
             if not rsa2_verify(raw_node, str(sign), self._alipay_public_key):
                 raise AlipayGatewayError("SIGN_VERIFY_FAILED", "响应签名校验失败")
         else:
             logger.warning("alipay response sign present but SKILLPAY_ALIPAY_PUBLIC_KEY 未配置，跳过验签")
+
+        # 业务码检查（T2 实证：业务失败藏在成功节点内，code != 10000）
+        code = str(node.get("code") or "")
+        if code and code != "10000":
+            sub_code = str(node.get("sub_code") or code)
+            internal = str(node.get("sub_msg") or node.get("msg") or "")
+            raise AlipayGatewayError(sub_code, internal)
         return node
 
     @staticmethod
@@ -191,9 +214,17 @@ class AlipayClient:
         )
 
     def fulfillment_confirm(self, trade_no: str) -> bool:
-        """履约回执（资源交付后异步调用；失败仅记日志，不影响已交付结果）。"""
+        """履约回执（资源交付后异步调用；失败仅记日志，不影响已交付结果）。
+
+        T2 实证：沙箱 fulfillment.confirm 耗时可超 10s（verify 数秒内返回），
+        此接口单独放宽到 30s。
+        """
         try:
-            self._call("alipay.aipay.agent.fulfillment.confirm", {"trade_no": trade_no})
+            self._call(
+                "alipay.aipay.agent.fulfillment.confirm",
+                {"trade_no": trade_no},
+                timeout=30.0,
+            )
             return True
         except AlipayGatewayError as e:
             # 买家 CLI 可能已代发回执 → TRADE_STATUS_INVALID 视为幂等成功
