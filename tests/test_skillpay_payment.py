@@ -418,7 +418,7 @@ class TestInterpretResponse:
         resourceId）——缺该兼容会解析出空值 → 五项校验失败 → 挡住已付款买家。"""
         client = self._client(keypair, sandbox=True)
 
-        def fake_call(method, biz_content):
+        def fake_call(method, biz_content, timeout=10.0):
             return {
                 "code": "10000", "msg": "Success",
                 "tradeNo": "T-CAMEL-1", "outTradeNo": "SK" + "1" * 30,

@@ -41,6 +41,7 @@ ERROR_USER_MESSAGES = {
     "TRADE_STATUS_CLOSED": "交易已关闭或不存在，请重新发起",
     "TRADE_NOT_FOUND": "交易已关闭或不存在，请重新发起",
     "CLIENT_SESSION_IS_EMPTY": "买家支付组件需升级到最新版后重试",
+    "NETWORK_ERROR": "支付平台响应超时，请稍后重试（不会重复扣款）",
     "SYSTEM_ERROR": "支付宝服务繁忙，请重试（幂等安全）",
 }
 DEFAULT_USER_MESSAGE = "支付验证失败，请重新支付"
@@ -209,11 +210,13 @@ class AlipayClient:
 
         响应字段 snake_case/camelCase 双兼容（官方 A2MPaymentDemo 同款防御：
         网关返回风格不确定，缺一兼容会解析出空值 → 挡住已付款买家）。
+        超时 20s：生产实测（2026-10-13 验收）10s 偶发 ReadTimeout →
+        verify 失败 → 买家侧 402 惊吓轮询；验凭证是只读操作，放宽无副作用。
         """
         biz = {"trade_no": trade_no, "payment_proof": payment_proof}
         if client_session:
             biz["client_session"] = client_session
-        node = self._call("alipay.aipay.agent.payment.verify", biz)
+        node = self._call("alipay.aipay.agent.payment.verify", biz, timeout=20.0)
         return VerifyResult(
             trade_no=str(node.get("trade_no") or node.get("tradeNo") or trade_no),
             out_trade_no=str(node.get("out_trade_no") or node.get("outTradeNo") or ""),
