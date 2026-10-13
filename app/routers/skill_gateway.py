@@ -669,6 +669,10 @@ async def _dispatch(op: str, payload) -> dict:
         )
         body = response.model_dump()
         body["op"] = "rename"  # §2.2 B：op 结果统一携带 op 字段
+        body["message"] = (
+            f"已重命名 {response.renamed} 个文件"
+            f"（跳过 {len(response.skipped)} 个，重名自增 {response.duplicates_resolved}）"
+        )
         return body
     if op == "dedup":
         return await run_in_threadpool(_run_dedup, payload.tickets, payload.ledger)
