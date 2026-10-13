@@ -693,6 +693,31 @@ class TestResume:
         assert r.status_code == 400
         assert "未持久化文件" in r.json()["detail"]
 
+    def test_resume_restore_failure_releases_claim(self, client, stub, tmp_path):
+        """对抗审查 R1-1：恢复失败（持久化文件已被清理）必须释放抢占——
+        否则订单卡死 verified，买家重试 claim 失败 → 409 死锁（钱已付货无）。"""
+        body = _merge_probe(client)
+        order = skill_gateway._get_order_store().get_order(body["out_trade_no"])
+        assert order.task_id
+        # 模拟 temp 清理 cron：删掉持久化目录
+        import shutil
+        shutil.rmtree(tmp_path / "temp" / order.task_id)
+
+        stub.verify_result = _ok_verify_result(body)
+        payload = {"op": "resume", "out_trade_no": body["out_trade_no"]}
+        headers = {"Payment-Proof": _proof("T-OK-1")}
+
+        r1 = client.post(URL, json=payload, headers=headers)
+        assert r1.status_code == 400
+        assert "已过期" in r1.json()["detail"]
+
+        # 关键断言：订单已释放回 created（而非 verified），重试仍是 400 而非 409
+        after = skill_gateway._get_order_store().get_order(body["out_trade_no"])
+        assert after.status == "created"
+        assert after.trade_no is None
+        r2 = client.post(URL, json=payload, headers=headers)
+        assert r2.status_code == 400
+
     def test_resume_options_restored(self, client, stub, monkeypatch):
         """probe 的 prefix/include_amount/include_type 表单选项随 resume 恢复。"""
         files = [("files", ("b.pdf", b"%PDF-1.4 x", "application/pdf"))]

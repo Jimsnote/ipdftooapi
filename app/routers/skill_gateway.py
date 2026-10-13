@@ -444,6 +444,10 @@ async def _new_bill_response(
     只支持 JSON 重试，支付后买家用 {op:"resume"} 恢复执行）。
     """
     cfg = skillpay_config_from_settings(settings)
+    # 防御：resume 是恢复操作绝不该出账单（正常路径已被 400/402 拦截，
+    # 此处防未来改动引入新调用路径时 generate_resource_id 抛 ValueError → 500）
+    if isinstance(payload, ResumePayload):  # pragma: no cover - 不可达防御
+        raise HTTPException(status_code=400, detail="resume 模式不支持出账单")
     probe_task_id = None
     if isinstance(payload, FilesPayload):
         probe_task_id = _persist_probe_files(payload)
@@ -808,15 +812,20 @@ async def skill_invoice(request: Request, background_tasks: BackgroundTasks):
 
     # resume：从订单 task_id 恢复 probe 持久化的文件批（含表单选项）
     dispatch_payload = payload
+    restored_files: List[UploadFile] = []
     if isinstance(payload, ResumePayload):
         restored = _restore_probe_files(order)
         if restored is None:
-            # 文件已被清理/订单无持久化——退款诉求走买家支付宝自行处理（同 F4-1 语义）
+            # 必须先释放抢占：否则订单卡死在 verified（trade_no 已占），
+            # 买家重试会 claim 失败 → result_cache 为空 → 409 死锁（钱已付货无）。
+            # 退款诉求走买家支付宝自行处理（同 F4-1 语义）。
+            store.release_claim(order.out_trade_no)
             raise HTTPException(
                 status_code=400,
                 detail="上传文件已过期（约 24 小时）或该订单未持久化文件，请重新发起请求",
             )
         dispatch_payload = restored
+        restored_files = restored.files
 
     # ---- 执行业务 ----
     try:
@@ -829,6 +838,13 @@ async def skill_invoice(request: Request, background_tasks: BackgroundTasks):
             order.op, order.out_trade_no, trade_no,
         )
         raise
+    finally:
+        # resume 恢复的文件句柄在此关闭（restore 打开的句柄 otherwise 靠 GC）
+        for f in restored_files:
+            try:
+                f.file.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     # T2 实证（官方 local_402_sandbox_pay 校验器）：200 响应须含非空
     # resource_id + content 证明资源归属——op 结果整体作为 content 载体
