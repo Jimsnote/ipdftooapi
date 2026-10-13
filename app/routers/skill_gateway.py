@@ -20,6 +20,7 @@ temp 实际清理窗口约 12~36 小时，对用户文案承诺「约 24 小时�
 """
 import json
 import os
+import shutil
 import threading
 from pathlib import Path
 from typing import List, Optional
@@ -128,6 +129,18 @@ class DedupRequest(BaseModel):
     ledger: List[DedupLedgerIn] = Field(default_factory=list, max_length=MAX_LEDGER)
 
 
+class ResumeRequest(BaseModel):
+    """P4 resume 模式：文件批支付后以 JSON 恢复执行（买家 CLI 只支持 JSON 重试）。
+
+    官方买家 CLI（alipay-bot 402-query-payment-status）的资源重试只支持内联
+    JSON body——multipart 文件批无官方自动重试通道。文件批 probe 时服务端已
+    持久化上传文件（订单记 task_id），支付后买家用本模式携 Payment-Proof 恢复。
+    """
+
+    op: str = "resume"
+    out_trade_no: str = Field(..., max_length=64)
+
+
 class FilesPayload:
     """multipart 文件批的解析产物（预检通过、待支付门禁）。"""
 
@@ -156,6 +169,19 @@ class JsonPayload:
     @property
     def file_count(self) -> int:
         return len(self.tickets)
+
+
+class ResumePayload:
+    def __init__(self, out_trade_no: str):
+        self.out_trade_no = out_trade_no
+
+    @property
+    def op(self) -> str:
+        return "resume"
+
+    @property
+    def file_count(self) -> int:
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +296,86 @@ async def _parse_files_request(request: Request) -> FilesPayload:
                         include_amount=include_amount, include_type=include_type)
 
 
+# ---------------------------------------------------------------------------
+# 文件批 probe 持久化 + resume 恢复（P4：官方买家 CLI 只支持 JSON 重试）
+# ---------------------------------------------------------------------------
+
+
+def _persist_probe_files(payload: FilesPayload) -> Optional[str]:
+    """文件批出账单前把上传文件落盘（买家支付后可经 resume 恢复执行）。
+
+    风险面与网站工具的匿名上传一致（限额同守卫 + temp 12~36h cron 清理 +
+    账单 15 分钟过期）；manifest 记录原名/存储名/表单选项。
+    """
+    try:
+        task_id, task_dir = make_task_dir(TEMP_DIR)
+        manifest = {
+            "files": [],
+            "options": {
+                "prefix": payload.prefix,
+                "include_amount": payload.include_amount,
+                "include_type": payload.include_type,
+            },
+        }
+        for i, f in enumerate(payload.files):
+            suffix = Path(f.filename or "").suffix.lower()
+            stored = f"probe_{i:03d}{suffix}"
+            path = safe_join(task_dir, stored)
+            with open(path, "wb") as out:
+                shutil.copyfileobj(f.file, out)
+            f.file.seek(0)
+            manifest["files"].append({"name": f.filename or f"file_{i + 1}", "stored": stored})
+        with open(safe_join(task_dir, "probe_manifest.json"), "w", encoding="utf-8") as mh:
+            json.dump(manifest, mh, ensure_ascii=False)
+        return task_id
+    except Exception:
+        # 持久化失败不阻断出账单（客户端仍可走 multipart 原样重试路径）
+        logger.exception("skillpay probe persist failed")
+        return None
+
+
+def _restore_probe_files(order) -> Optional[FilesPayload]:
+    """resume 时从订单 task_id 恢复 probe 持久化的文件批（含表单选项）。
+
+    任一环节缺失（目录被清理/manifest 损坏）返回 None——调用方引导重新上传。
+    """
+    if not order.task_id:
+        return None
+    try:
+        task_dir = get_task_dir(TEMP_DIR, order.task_id)
+    except HTTPException:
+        return None
+    manifest_path = os.path.join(task_dir, "probe_manifest.json")
+    if not os.path.isdir(task_dir) or not os.path.exists(manifest_path):
+        return None
+    try:
+        with open(manifest_path, encoding="utf-8") as mh:
+            manifest = json.load(mh)
+        files: List[UploadFile] = []
+        for item in manifest.get("files", []):
+            stored_path = safe_join(task_dir, str(item.get("stored") or ""))
+            if not os.path.exists(stored_path):
+                return None
+            fh = open(stored_path, "rb")
+            files.append(StarletteUploadFile(
+                fh, size=os.path.getsize(stored_path),
+                filename=str(item.get("name") or "file"),
+            ))
+        if not files:
+            return None
+        opts = manifest.get("options", {})
+        return FilesPayload(
+            op=order.op,
+            files=files,
+            prefix=str(opts.get("prefix") or ""),
+            include_amount=bool(opts.get("include_amount")),
+            include_type=bool(opts.get("include_type")),
+        )
+    except Exception:
+        logger.exception("skillpay resume restore failed: out_trade_no=%s", order.out_trade_no)
+        return None
+
+
 async def _read_bounded_json_body(request: Request, limit: int) -> dict:
     """流式限量读 JSON body（review② F2）。
 
@@ -301,14 +407,21 @@ async def _read_bounded_json_body(request: Request, limit: int) -> dict:
         raise HTTPException(status_code=400, detail="请求体不是合法 JSON") from e
 
 
-async def _parse_json_request(request: Request) -> JsonPayload:
+async def _parse_json_request(request: Request):
     body = await _read_bounded_json_body(request, MAX_JSON_BODY)
+    op = str(body.get("op") or "dedup")
+    if op == "resume":
+        try:
+            req = ResumeRequest.model_validate(body)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"resume 请求参数无效：{e}") from e
+        return ResumePayload(out_trade_no=req.out_trade_no)
     try:
         req = DedupRequest.model_validate(body)
     except Exception as e:  # noqa: BLE001 - 全局 422 处理器不覆盖手写解析路径
         raise HTTPException(status_code=400, detail=f"查重请求参数无效：{e}") from e
     if (req.op or "dedup") != "dedup":
-        raise HTTPException(status_code=400, detail="JSON 模式仅支持 op=dedup")
+        raise HTTPException(status_code=400, detail="JSON 模式仅支持 op=dedup 或 op=resume")
     return JsonPayload(tickets=req.tickets, ledger=req.ledger)
 
 
@@ -325,11 +438,19 @@ async def _new_bill_response(
     message: Optional[str] = None,
     gateway_code: Optional[str] = None,
 ) -> JSONResponse:
-    """无有效凭证：新建订单 + 出账单（402 + Payment-Needed 头，P0 §2.2 A/C）。"""
+    """无有效凭证：新建订单 + 出账单（402 + Payment-Needed 头，P0 §2.2 A/C）。
+
+    文件批出账单前持久化上传文件（P4 resume 模式的恢复源——官方买家 CLI
+    只支持 JSON 重试，支付后买家用 {op:"resume"} 恢复执行）。
+    """
     cfg = skillpay_config_from_settings(settings)
+    probe_task_id = None
+    if isinstance(payload, FilesPayload):
+        probe_task_id = _persist_probe_files(payload)
     out_trade_no = generate_out_trade_no()
     resource_id = generate_resource_id(payload.op)
-    store.create_order(out_trade_no, payload.op, resource_id, cfg.amount, payload.file_count)
+    store.create_order(out_trade_no, payload.op, resource_id, cfg.amount,
+                       payload.file_count, task_id=probe_task_id)
     bill = build_bill(cfg, op=payload.op, file_count=payload.file_count,
                       out_trade_no=out_trade_no, resource_id=resource_id)
 
@@ -589,6 +710,12 @@ async def skill_invoice(request: Request, background_tasks: BackgroundTasks):
             status_code=400, detail="Content-Type 须为 multipart/form-data 或 application/json"
         )
 
+    # resume 是支付后的恢复操作，必须携带有效凭证（不发账单）
+    if isinstance(payload, ResumePayload) and (not proof_header or proof_error is not None):
+        raise HTTPException(
+            status_code=400, detail="resume 必须携带有效 Payment-Proof（它是支付后的恢复操作）"
+        )
+
     # ---- 支付门禁 ----
     if not proof_header:
         return await _new_bill_response(store, payload)
@@ -608,19 +735,33 @@ async def skill_invoice(request: Request, background_tasks: BackgroundTasks):
             "skillpay verify failed: trade_no=%s code=%s detail=%s",
             trade_no, e.sub_code, e.internal,
         )
+        if isinstance(payload, ResumePayload):
+            # resume 是恢复操作不发新账单：原样退回人话错误，引导核对凭证
+            return JSONResponse(
+                status_code=402,
+                content={
+                    "error": "Payment Invalid",
+                    "message": e.user_message,
+                    "gateway_code": e.sub_code,
+                },
+            )
         return await _new_bill_response(
             store, payload, error="Payment Invalid",
             message=e.user_message, gateway_code=e.sub_code,
         )
 
     # 五项业务校验（active/amount/out_trade_no/resource_id/未重复履约）
+    # op 匹配特判（P4 resume）：resume 载体的订单 op 必须是文件批 op
     order = store.get_order(result.out_trade_no) if result.out_trade_no else None
+    op_matches = order is not None and (
+        payload.op == order.op or (payload.op == "resume" and order.op in FILE_OPS)
+    )
     if (
         order is None
         or not result.active
         or result.resource_id != order.resource_id
         or result.amount != order.amount
-        or payload.op != order.op
+        or not op_matches
     ):
         logger.warning(
             "skillpay business check failed: trade_no=%s out_trade_no=%s active=%s "
@@ -629,6 +770,15 @@ async def skill_invoice(request: Request, background_tasks: BackgroundTasks):
             order.amount if order else "-", result.resource_id, payload.op,
             order.op if order else "-",
         )
+        if isinstance(payload, ResumePayload):
+            # resume 失败不发新账单（同 verify 错误分支语义）
+            return JSONResponse(
+                status_code=402,
+                content={
+                    "error": "Payment Invalid",
+                    "message": "支付凭证与本订单不匹配，请核对 out_trade_no 后重试",
+                },
+            )
         return await _new_bill_response(
             store, payload, error="Payment Invalid", message="支付凭证校验未通过，请重新支付"
         )
@@ -656,9 +806,21 @@ async def skill_invoice(request: Request, background_tasks: BackgroundTasks):
             },
         )
 
+    # resume：从订单 task_id 恢复 probe 持久化的文件批（含表单选项）
+    dispatch_payload = payload
+    if isinstance(payload, ResumePayload):
+        restored = _restore_probe_files(order)
+        if restored is None:
+            # 文件已被清理/订单无持久化——退款诉求走买家支付宝自行处理（同 F4-1 语义）
+            raise HTTPException(
+                status_code=400,
+                detail="上传文件已过期（约 24 小时）或该订单未持久化文件，请重新发起请求",
+            )
+        dispatch_payload = restored
+
     # ---- 执行业务 ----
     try:
-        result_body = await _dispatch(order.op, payload)
+        result_body = await _dispatch(order.op, dispatch_payload)
     except Exception:
         # 业务失败不把订单卡死在 verified（释放后买家携同一凭证可重试）
         store.release_claim(order.out_trade_no)

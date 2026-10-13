@@ -572,3 +572,153 @@ class TestDownload:
         # 非 ASCII 文件名走 RFC 5987：filename*=utf-8''<percent-encoded>
         assert "attachment" in r.headers["content-disposition"]
         assert "%E5%8F%91%E7%A5%A8%E5%8F%B0%E8%B4%A6" in r.headers["content-disposition"]
+
+
+# ---------------------------------------------------------------------------
+# resume 模式（P4 前置：官方买家 CLI 只支持 JSON 重试，文件批支付后 JSON 恢复）
+# ---------------------------------------------------------------------------
+
+
+def _merge_probe(client) -> dict:
+    """文件批（merge + PDF magic）probe → 402 body。"""
+    files = [("files", ("a.pdf", b"%PDF-1.4 fake-content", "application/pdf"))]
+    r = client.post(URL, files=files, data={"op": "merge"})
+    assert r.status_code == 402, r.text
+    return r.json()
+
+
+class TestResume:
+    def test_probe_persists_files_and_manifest(self, client, tmp_path):
+        """文件批 probe 出账单时：订单 task_id 非空 + temp 下有 manifest 与 probe_000.pdf。"""
+        body = _merge_probe(client)
+        order = skill_gateway._get_order_store().get_order(body["out_trade_no"])
+        assert order is not None and order.task_id
+        task_dir = tmp_path / "temp" / order.task_id
+        assert (task_dir / "probe_manifest.json").exists()
+        assert (task_dir / "probe_000.pdf").read_bytes() == b"%PDF-1.4 fake-content"
+        manifest = json.loads((task_dir / "probe_manifest.json").read_text(encoding="utf-8"))
+        assert manifest["files"][0]["name"] == "a.pdf"
+        assert manifest["options"]["prefix"] == ""
+
+    def test_resume_without_proof_400(self, client):
+        body = _merge_probe(client)
+        r = client.post(URL, json={"op": "resume", "out_trade_no": body["out_trade_no"]})
+        assert r.status_code == 400
+        assert "Payment-Proof" in r.json()["detail"]
+
+    def test_resume_with_malformed_proof_400(self, client):
+        body = _merge_probe(client)
+        r = client.post(
+            URL,
+            json={"op": "resume", "out_trade_no": body["out_trade_no"]},
+            headers={"Payment-Proof": "not-valid-base64!!!"},
+        )
+        assert r.status_code == 400
+        assert "Payment-Proof" in r.json()["detail"]
+
+    def test_resume_success_dispatches_restored_files(self, client, stub, monkeypatch):
+        """stub verify 指向 probe 订单 + 假 _run_merge → 200 + content 假结果 + 订单 fulfilled。"""
+        body = _merge_probe(client)
+        stub.verify_result = _ok_verify_result(body)
+
+        async def fake_merge(files):
+            assert len(files) == 1
+            assert files[0].filename == "a.pdf"
+            return {"task_id": "FAKE-TASK", "download_url": "/x", "message": "fake merged"}
+
+        monkeypatch.setattr(skill_gateway, "_run_merge", fake_merge)
+        r = client.post(
+            URL,
+            json={"op": "resume", "out_trade_no": body["out_trade_no"]},
+            headers={"Payment-Proof": _proof("T-OK-1")},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["op"] == "merge"
+        assert r.json()["content"] == {
+            "task_id": "FAKE-TASK", "download_url": "/x", "message": "fake merged",
+        }
+        order = skill_gateway._get_order_store().get_order(body["out_trade_no"])
+        assert order.status == "fulfilled"
+        assert order.result_cache is not None
+
+    def test_resume_replays_after_fulfilled(self, client, stub, monkeypatch):
+        """同凭证重放（已 fulfilled）→ already_fulfilled=true（verify 后回放缓存）。"""
+        body = _merge_probe(client)
+        stub.verify_result = _ok_verify_result(body)
+
+        async def fake_merge(files):
+            return {"task_id": "FAKE-TASK", "download_url": "/x", "message": "fake merged"}
+
+        monkeypatch.setattr(skill_gateway, "_run_merge", fake_merge)
+        payload = {"op": "resume", "out_trade_no": body["out_trade_no"]}
+        headers = {"Payment-Proof": _proof("T-OK-1")}
+        first = client.post(URL, json=payload, headers=headers)
+        assert first.status_code == 200
+        replay = client.post(URL, json=payload, headers=headers)
+        assert replay.status_code == 200
+        assert replay.json()["already_fulfilled"] is True
+        assert replay.json()["content"] == first.json()["content"]
+
+    def test_resume_against_dedup_order_402(self, client, stub):
+        """resume 载体的订单 op 必须是文件批——dedup 订单 → 402 Payment Invalid。"""
+        r = client.post(URL, json=_dedup_body())
+        assert r.status_code == 402
+        body = r.json()
+        stub.verify_result = _ok_verify_result(body)
+        r2 = client.post(
+            URL,
+            json={"op": "resume", "out_trade_no": body["out_trade_no"]},
+            headers={"Payment-Proof": _proof("T-OK-1")},
+        )
+        assert r2.status_code == 402
+        assert r2.json()["error"] == "Payment Invalid"
+
+    def test_resume_order_without_task_id_400(self, client, stub):
+        """订单未持久化文件（task_id 为空）→ 400 引导重新发起。"""
+        store = skill_gateway._get_order_store()
+        store.create_order("SKTESTNOFILE000000000000000000", "merge",
+                           "M" + "a" * 31, "0.01", 1, task_id=None)
+        stub.verify_result = VerifyResult(
+            trade_no="T-OK-1",
+            out_trade_no="SKTESTNOFILE000000000000000000",
+            resource_id="M" + "a" * 31,
+            amount="0.01",
+            active=True,
+        )
+        r = client.post(
+            URL,
+            json={"op": "resume", "out_trade_no": "SKTESTNOFILE000000000000000000"},
+            headers={"Payment-Proof": _proof("T-OK-1")},
+        )
+        assert r.status_code == 400
+        assert "未持久化文件" in r.json()["detail"]
+
+    def test_resume_options_restored(self, client, stub, monkeypatch):
+        """probe 的 prefix/include_amount/include_type 表单选项随 resume 恢复。"""
+        files = [("files", ("b.pdf", b"%PDF-1.4 x", "application/pdf"))]
+        r = client.post(
+            URL, files=files,
+            data={"op": "rename", "prefix": "报销", "include_amount": "true"},
+        )
+        assert r.status_code == 402
+        body = r.json()
+        captured = {}
+
+        def fake_run_batch(files_, prefix, include_amount, include_type):
+            captured.update(prefix=prefix, include_amount=include_amount,
+                            include_type=include_type)
+            from app.models.invoice_extract import RenameBatchResponse
+            return RenameBatchResponse(
+                task_id="T-1", download_url="/d", total=1, renamed=0,
+                duplicates_resolved=0, skipped=[],
+            )
+
+        monkeypatch.setattr(skill_gateway, "rename_run_batch", fake_run_batch)
+        stub.verify_result = _ok_verify_result(body)
+        r2 = client.post(
+            URL,
+            json={"op": "resume", "out_trade_no": body["out_trade_no"]},
+            headers={"Payment-Proof": _proof("T-OK-1")},
+        )
+        assert r2.status_code == 200, r2.text
+        assert captured == {"prefix": "报销", "include_amount": True, "include_type": False}

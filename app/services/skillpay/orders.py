@@ -104,13 +104,20 @@ class OrderStore:
     # -- 基本读写 -----------------------------------------------------------
 
     def create_order(
-        self, out_trade_no: str, op: str, resource_id: str, amount: str, file_count: int
+        self,
+        out_trade_no: str,
+        op: str,
+        resource_id: str,
+        amount: str,
+        file_count: int,
+        task_id: Optional[str] = None,
     ) -> None:
+        """task_id：文件批 probe 持久化的上传文件目录（P4 resume 模式恢复源）。"""
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO orders (out_trade_no, op, resource_id, amount, status, file_count, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (out_trade_no, op, resource_id, amount, STATUS_CREATED, file_count, _now_iso()),
+                "INSERT INTO orders (out_trade_no, op, resource_id, amount, status, file_count, task_id, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (out_trade_no, op, resource_id, amount, STATUS_CREATED, file_count, task_id, _now_iso()),
             )
 
     def get_order(self, out_trade_no: str) -> Optional[Order]:
