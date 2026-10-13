@@ -425,7 +425,8 @@ class TestReview1Security:
 
     def test_total_size_guard(self, monkeypatch):
         """总量守卫：实读累计超上限 → 400 整批拒绝（不落任务产物）。"""
-        from app.routers import invoice_rename as mod
+        # 2026-10-13 §6.4 提取重构：MAX_TOTAL_SIZE 随编排体搬至 services 层
+        from app.services import invoice_rename as mod
 
         monkeypatch.setattr(mod, "MAX_TOTAL_SIZE", 1024)
         files = [

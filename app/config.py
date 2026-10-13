@@ -1,8 +1,13 @@
 import json
+import os
 from typing import Any, List
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 可选环境文件覆盖（本地 T2 沙箱联调：API_ENV_FILE=.env.sandbox uvicorn …）。
+# 不设置时行为与原先完全一致（读 ./env 同目录 .env）。
+_ENV_FILE_OVERRIDE = os.environ.get("API_ENV_FILE") or None
 
 
 class Settings(BaseSettings):
@@ -62,5 +67,22 @@ class Settings(BaseSettings):
     OCR_MIN_IMG_DIM: int = 200
     OCR_ENGINE: str = "onnxruntime"  # "onnxruntime" (Linux) | "mkldnn_false" (Windows local test)
 
+    # Pay Skill（支付宝 AI 按量付费 / A402）
+    # docs/2026-10-13_invoice-toolkit-pro-p0-design.md §5.5 / §10.1
+    # 沙箱凭据见 apps/api/.env.sandbox（gitignore）；本地 T2 联调用
+    # API_ENV_FILE=.env.sandbox 启动（显式指定环境文件，生产不受影响）
+    SKILLPAY_SANDBOX: bool = False
+    SKILLPAY_APP_ID: str = ""
+    SKILLPAY_PRIVATE_KEY: str = ""  # 应用私钥（PKCS#8/PKCS#1 裸 base64 或 PEM）
+    SKILLPAY_ALIPAY_PUBLIC_KEY: str = ""  # 支付宝公钥（验网关响应签名）
+    SKILLPAY_SELLER_ID: str = ""  # 2088 开头
+    SKILLPAY_SERVICE_ID: str = ""  # 生产=服务注册所得 API_…；沙箱=api_mock_service_id
+    SKILLPAY_SELLER_NAME: str = "iPDFToo"
+    SKILLPAY_AMOUNT: str = "0.01"  # 三处一致约束：支付宝登记价=账单 amount=SkillHub 展示价
+    SKILLPAY_PAY_BEFORE_MINUTES: int = 15
 
-settings = Settings()
+
+_settings_cls = Settings
+settings = (
+    _settings_cls(_env_file=_ENV_FILE_OVERRIDE) if _ENV_FILE_OVERRIDE else _settings_cls()
+)
