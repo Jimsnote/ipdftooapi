@@ -391,12 +391,13 @@ class TestInterpretResponse:
         text = self._signed_text(keypair, node)
         assert client._interpret_response(text, _VERIFY_METHOD) == node
 
-    def test_sandbox_skips_unverifiable_sign(self, keypair):
-        """沙箱实测：交付的两把公钥都验不了沙箱签名 → sandbox=True 跳过放行。"""
+    def test_unverifiable_sign_warns_but_passes(self, keypair):
+        """T2/T3 双环境实证：交付公钥验不出 aipay 网关响应签名 → 尽力而为
+        （失败记 WARNING 不挡业务——官方规范与 Python demo 均不做响应验签）。"""
         client = self._client(keypair, sandbox=True, with_alipay_key=True)
         node = {"code": "10000", "trade_no": "T1"}
         text = self._signed_text(keypair, node, tamper_sign=True)  # 故意坏签名
-        assert client._interpret_response(text, _VERIFY_METHOD) == node  # 沙箱不校验
+        assert client._interpret_response(text, _VERIFY_METHOD) == node  # 不再阻断
 
     def test_production_verifies_sign_over_raw_substring(self, keypair):
         client = self._client(keypair, sandbox=False, with_alipay_key=True)
@@ -404,13 +405,33 @@ class TestInterpretResponse:
         text = self._signed_text(keypair, node)
         assert client._interpret_response(text, _VERIFY_METHOD) == node
 
-    def test_production_bad_sign_fails_closed(self, keypair):
+    def test_production_bad_sign_warns_but_passes(self, keypair):
+        """T3 生产实证决策：验签失败降级 WARNING 不抛错——严格 fail-closed
+        会挡住已付款买家（生产冒烟实测 SIGN_VERIFY_FAILED 阻断交付路径）。"""
         client = self._client(keypair, sandbox=False, with_alipay_key=True)
         node = {"code": "10000", "trade_no": "T1"}
         text = self._signed_text(keypair, node, tamper_sign=True)
-        with pytest.raises(AlipayGatewayError) as ei:
-            client._interpret_response(text, _VERIFY_METHOD)
-        assert ei.value.sub_code == "SIGN_VERIFY_FAILED"
+        assert client._interpret_response(text, _VERIFY_METHOD) == node  # 尽力而为
+
+    def test_verify_payment_camel_case_fields(self, keypair):
+        """官方 demo 双兼容：网关响应字段可能是 camelCase（tradeNo/outTradeNo/
+        resourceId）——缺该兼容会解析出空值 → 五项校验失败 → 挡住已付款买家。"""
+        client = self._client(keypair, sandbox=True)
+
+        def fake_call(method, biz_content):
+            return {
+                "code": "10000", "msg": "Success",
+                "tradeNo": "T-CAMEL-1", "outTradeNo": "SK" + "1" * 30,
+                "resourceId": "D" + "2" * 31, "amount": "0.01", "active": True,
+            }
+
+        client._call = fake_call
+        result = client.verify_payment("pp", "T-CAMEL-1", None)
+        assert result.trade_no == "T-CAMEL-1"
+        assert result.out_trade_no == "SK" + "1" * 30
+        assert result.resource_id == "D" + "2" * 31
+        assert result.amount == "0.01"
+        assert result.active is True
 
     def test_error_response_raises_with_sub_code(self, keypair):
         client = self._client(keypair, sandbox=True)

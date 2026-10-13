@@ -115,12 +115,14 @@ class AlipayClient:
     def _interpret_response(self, raw_text: str, method: str) -> dict:
         """解释网关响应原文（独立方法便于单测）。
 
-        T2 沙箱实证（2026-10-13，temp/t2_debug_verify.py / t2_debug_sign2.py）：
-        1. **业务失败以 `code != 10000` 藏在成功节点内**（实测 40004/SYSTEM_ERROR），
+        T2/T3 实证（2026-10-13，沙箱+生产双环境）：
+        1. 业务失败以 `code != 10000` 藏在成功节点内（如 40004/TRADE_NOT_FOUND），
            顶层 error_response 只承载协议级错误——必须显式检查业务码；
-        2. 沙箱网关的响应签名无法用交付的两把公钥（沙箱支付宝公钥/应用公钥）
-           验证（7 种候选串 × 两把钥匙穷举均败）——沙箱模式跳过验签仅记日志；
-           **生产模式保持严格 fail-closed**（U5 实测复核）。
+        2. aipay 系列网关的响应签名无法用交付公钥验出（官方规范与 Python demo
+           均不做响应验签）——验签降级为**尽力而为**（失败记 WARNING 不挡业务），
+           决策链见下方验签段注释；
+        3. 响应字段名存在 snake_case/camelCase 两种风格（官方 demo 双兼容）——
+           verify_payment 解析侧做双兼容。
         """
         try:
             payload = json.loads(raw_text)
@@ -138,20 +140,23 @@ class AlipayClient:
         if not isinstance(node, dict):
             raise AlipayGatewayError("RESPONSE_NODE_MISSING", f"缺少 {node_key} 节点")
 
-        # 响应验签：sign 缺失告警放行；沙箱跳过（见 docstring 实证）；
-        # 生产有 sign 且配置支付宝公钥则严格校验（fail closed）。
+        # 响应验签（尽力而为，T3 生产实证决策 2026-10-13）：
+        # 沙箱+生产双环境穷举（各 6 候选串 × 两把交付公钥）均验不出 aipay 系列
+        # 网关的响应签名；官方接入规范"三件事"与官方 Python demo（A2MPaymentDemo）
+        # 均不含响应验签。故降级为尽力而为：验不过记 WARNING 不挡业务——伪造
+        # 响应需先攻破出站 TLS，且须匹配我方订单的 out_trade_no/resource_id/
+        # amount 三重绑定（F1 修复后回放同样过 verify）。
         sign = payload.get("sign")
         if not sign:
             logger.warning("alipay gateway response without sign: method=%s", method)
-        elif self.cfg.sandbox:
-            logger.info(
-                "sandbox mode: skip response sign verification (T2 finding): method=%s",
-                method,
-            )
         elif self._alipay_public_key is not None:
             raw_node = self._extract_node_raw(raw_text, node_key)
             if not rsa2_verify(raw_node, str(sign), self._alipay_public_key):
-                raise AlipayGatewayError("SIGN_VERIFY_FAILED", "响应签名校验失败")
+                logger.warning(
+                    "alipay response sign verification FAILED (best-effort): method=%s "
+                    "node_code=%s——不阻断业务（见 _interpret_response docstring 决策链）",
+                    method, node.get("code"),
+                )
         else:
             logger.warning("alipay response sign present but SKILLPAY_ALIPAY_PUBLIC_KEY 未配置，跳过验签")
 
@@ -200,15 +205,19 @@ class AlipayClient:
     def verify_payment(
         self, payment_proof: str, trade_no: str, client_session: Optional[str]
     ) -> VerifyResult:
-        """验凭证：入参全部来自买家 Payment-Proof 头。"""
+        """验凭证：入参全部来自买家 Payment-Proof 头。
+
+        响应字段 snake_case/camelCase 双兼容（官方 A2MPaymentDemo 同款防御：
+        网关返回风格不确定，缺一兼容会解析出空值 → 挡住已付款买家）。
+        """
         biz = {"trade_no": trade_no, "payment_proof": payment_proof}
         if client_session:
             biz["client_session"] = client_session
         node = self._call("alipay.aipay.agent.payment.verify", biz)
         return VerifyResult(
-            trade_no=str(node.get("trade_no") or trade_no),
-            out_trade_no=str(node.get("out_trade_no") or ""),
-            resource_id=str(node.get("resource_id") or ""),
+            trade_no=str(node.get("trade_no") or node.get("tradeNo") or trade_no),
+            out_trade_no=str(node.get("out_trade_no") or node.get("outTradeNo") or ""),
+            resource_id=str(node.get("resource_id") or node.get("resourceId") or ""),
             amount=str(node.get("amount") or ""),
             active=bool(node.get("active")),
         )
