@@ -663,9 +663,13 @@ async def _dispatch(op: str, payload) -> dict:
     if op == "extract":
         return await run_in_threadpool(_run_extract, payload.files)
     if op == "rename":
+        # 关键字传参：run_batch 形参在 2026-10-17 新增 include_seller 后，
+        # 位置传参会静默错位（include_amount 值落进 seller 槽）——付费版
+        # 暂不暴露销售方开关， seller 恒默认 False，行为与契约零变化
         response = await run_in_threadpool(
             rename_run_batch, payload.files, payload.prefix,
-            payload.include_amount, payload.include_type,
+            include_amount=payload.include_amount,
+            include_type=payload.include_type,
         )
         body = response.model_dump()
         body["op"] = "rename"  # §2.2 B：op 结果统一携带 op 字段
