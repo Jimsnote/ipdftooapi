@@ -27,10 +27,11 @@ TEMP_DIR = os.path.abspath("/app/temp" if os.path.exists("/app/temp") else "./te
 def rename_batch(
     files: list[UploadFile] = File(...),
     prefix: str = Form(""),
+    include_seller: bool = Form(False),
     include_amount: bool = Form(False),
     include_type: bool = Form(False),
 ):
-    return run_batch(files, prefix, include_amount, include_type)
+    return run_batch(files, prefix, include_seller, include_amount, include_type)
 
 
 @router.get("/rename-download/{task_id}", summary="下载发票批量重命名 ZIP")

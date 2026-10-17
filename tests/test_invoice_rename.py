@@ -17,6 +17,7 @@ from app.services.invoice_rename import (
     MAX_BUYER_LEN,
     MAX_FILENAME_LEN,
     MAX_PREFIX_LEN,
+    MAX_SELLER_LEN,
     _sanitize_component,
     build_report_text,
     build_target_name,
@@ -75,6 +76,45 @@ class TestBuildTargetName:
     def test_include_amount(self):
         name = build_target_name(_rec(), ".pdf", include_amount=True)
         assert name == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}_736792.00元.pdf"
+
+    def test_include_seller(self):
+        """销售方开关（2026-10-17）：买卖双方相邻，位于购买方之后。"""
+        rec = _rec(seller_name="方叔叔餐饮管理（北京）有限公司")
+        name = build_target_name(rec, ".pdf", include_seller=True)
+        assert name == (
+            f"{NUM_PDF}_{BUYER_PDF}_方叔叔餐饮管理（北京）有限公司_{DATE_PDF}.pdf"
+        )
+
+    def test_seller_off_by_default(self):
+        rec = _rec(seller_name="方叔叔餐饮管理（北京）有限公司")
+        name = build_target_name(rec, ".pdf")
+        assert "方叔叔" not in name
+
+    def test_seller_missing_omitted(self):
+        """取不到销售方 → 该段省略（宁缺勿错，对齐票种语义）。"""
+        rec = _rec(seller_name=None)
+        name = build_target_name(rec, ".pdf", include_seller=True)
+        assert name == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}.pdf"
+
+    def test_seller_truncated_to_30(self):
+        long_seller = "沪" * 40
+        name = build_target_name(_rec(seller_name=long_seller), ".pdf", include_seller=True)
+        assert f"{'沪' * MAX_SELLER_LEN}_" in name
+        assert long_seller not in name
+
+    def test_seller_position_with_all_segments(self):
+        """全段顺序：号码_购买方_销售方_日期_票种_金额。"""
+        rec = _rec(
+            seller_name="方叔叔餐饮管理（北京）有限公司",
+            invoice_type="电子发票（增值税专用发票）",
+        )
+        name = build_target_name(
+            rec, ".pdf", include_seller=True, include_type=True, include_amount=True
+        )
+        assert name == (
+            f"{NUM_PDF}_{BUYER_PDF}_方叔叔餐饮管理（北京）有限公司_{DATE_PDF}"
+            f"_专票_736792.00元.pdf"
+        )
 
     def test_amount_off_by_default_and_when_total_missing(self):
         assert "_元" not in build_target_name(_rec(), ".pdf")
@@ -302,6 +342,29 @@ class TestRenameBatchRoute:
         assert (
             f"26112000001182262488_{BUYER_XML}_2026-03-26_专票.xml" in names
         )
+
+    def test_include_seller_end_to_end(self):
+        """销售方开关端到端：XML 票面的 SellerName 进文件名（购买方之后）。"""
+        r = client.post(
+            "/api/v1/invoice/rename-batch",
+            files=[_fu(_xml(), "a.xml", "application/xml")],
+            data={"include_seller": "true"},
+        )
+        body = r.json()
+        assert body["renamed"] == 1
+        dl = client.get(body["download_url"])
+        names = zipfile.ZipFile(io.BytesIO(dl.content)).namelist()
+        assert (
+            f"{NUM_XML}_{BUYER_XML}_方叔叔餐饮管理（北京）有限公司_{DATE_XML}.xml" in names
+        )
+        # 默认关闭路径不受影响
+        r2 = client.post(
+            "/api/v1/invoice/rename-batch",
+            files=[_fu(_xml(), "a.xml", "application/xml")],
+        )
+        dl2 = client.get(r2.json()["download_url"])
+        names2 = zipfile.ZipFile(io.BytesIO(dl2.content)).namelist()
+        assert f"{NUM_XML}_{BUYER_XML}_{DATE_XML}.xml" in names2
 
     def test_duplicates_resolved(self):
         """同号码同购买方同日期（红冲重开）→ 第二个自动 __2。"""

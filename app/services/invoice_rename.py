@@ -43,6 +43,7 @@ logger = get_logger(__name__)
 
 MAX_PREFIX_LEN = 50
 MAX_BUYER_LEN = 30
+MAX_SELLER_LEN = 30
 MAX_FILENAME_LEN = 100
 
 # Windows 保留名（大小写不敏感，含无扩展名与带扩展名两种形态基名）
@@ -124,6 +125,7 @@ def build_target_name(
     record: InvoiceRecord,
     ext: str,
     prefix: str = "",
+    include_seller: bool = False,
     include_amount: bool = False,
     include_type: bool = False,
 ) -> str:
@@ -133,6 +135,10 @@ def build_target_name(
     前置条件：record.invoice_number 非空（调用方保证，空号码走 skipped）。
     票种段（2026-10-05 用户新增）：include_type 开启且类型可判定时，
     在日期后追加 _专票/_普票；金额开关语义保持"末尾附加价税合计"。
+    销售方段（2026-10-17 用户新增）：include_seller 开启且销售方可识别时，
+    在购买方后追加（买卖双方相邻）；取不到省略，宁缺勿错。
+    与 skills/invoice-rename/scripts/invoice_core/naming.py 双源同构——
+    改动必须双向同步。
     """
     safe_prefix = _sanitize_component(prefix, MAX_PREFIX_LEN)
     number = _sanitize_component(record.invoice_number, 20) or "unknown"
@@ -141,6 +147,10 @@ def build_target_name(
 
     safe_ext = ext if ext.startswith(".") else f".{ext}"
     parts = [number, buyer]
+    if include_seller and record.seller_name:
+        seller = _sanitize_component(record.seller_name, MAX_SELLER_LEN)
+        if seller:
+            parts.append(seller)
     if date:
         parts.append(date)
     if include_type:
@@ -311,7 +321,7 @@ _MAGIC_MESSAGES = {
 
 def _parse_one(
     task_dir: str, index: int, orig_name: str, data: bytes, prefix: str,
-    include_amount: bool, include_type: bool,
+    include_seller: bool, include_amount: bool, include_type: bool,
 ) -> Tuple[str, bytes, str]:
     """解析单文件并生成目标名。返回 (目标名, 数据, 扩展名)。
 
@@ -342,13 +352,14 @@ def _parse_one(
         raise InvoiceExtractError(
             "未能识别出发票号码——可能不是数电票标准版式，暂不支持"
         )
-    target = build_target_name(rec, ext, prefix, include_amount, include_type)
+    target = build_target_name(rec, ext, prefix, include_seller, include_amount, include_type)
     return target, data, ext
 
 
 def run_batch(
     files: List[UploadFile],
     prefix: str = "",
+    include_seller: bool = False,
     include_amount: bool = False,
     include_type: bool = False,
 ) -> RenameBatchResponse:
@@ -389,7 +400,8 @@ def run_batch(
                     detail="所有文件加起来不能超过 100MB，请分批处理",
                 )
             target, data, ext = _parse_one(
-                task_dir, index, orig_name, data, prefix, include_amount,
+                task_dir, index, orig_name, data, prefix, include_seller,
+                include_amount,
                 include_type,
             )
             renamed.append((orig_name, target, data, ext))
