@@ -7,9 +7,14 @@ from app.models.invoice_extract import InvoiceRecord
 
 # 统一社会信用代码/纳税人识别号字符集（18 位标准；兼容 15 位老税号纯数字）
 TAX_ID_RE = re.compile(r"^[0-9A-HJ-NPQRTUWXY]{15,20}$")
-AMOUNT_RE = re.compile(r"^\d{1,12}(\.\d{1,2})?$")
+# 负号：红字发票（冲销/红冲）金额为负，必须可解析（2026-10-21 虾评众测 #7，
+# 与 skills/invoice-rename/scripts/invoice_core/base.py 双源同步）
+AMOUNT_RE = re.compile(r"^-?\d{1,12}(\.\d{1,2})?$")
 CN_DATE_RE = re.compile(r"^(\d{4})年(\d{1,2})月(\d{1,2})日$")
-ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
+# ISO 前缀匹配：吃掉 "yyyy-MM-dd HH:mm:ss"（乐企等开票平台常见写法，取前 10 位）
+ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})")
+COMPACT_DATE_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+SLASH_DATE_RE = re.compile(r"^(\d{4})/(\d{1,2})/(\d{1,2})")
 
 
 class InvoiceExtractError(Exception):
@@ -61,7 +66,8 @@ def normalize_cn_date(raw: Optional[str]) -> Optional[str]:
     if not raw:
         return None
     s = str(raw).strip()
-    m = CN_DATE_RE.match(s) or ISO_DATE_RE.match(s)
+    m = (CN_DATE_RE.match(s) or ISO_DATE_RE.match(s)
+         or COMPACT_DATE_RE.match(s) or SLASH_DATE_RE.match(s))
     if not m:
         return None
     try:

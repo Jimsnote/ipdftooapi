@@ -99,6 +99,13 @@ class RenameSkippedItem(BaseModel):
     reason: str
 
 
+class RenameWarningItem(BaseModel):
+    """单文件校验告警（2026-10-21 虾评众测 #4：validate_record 的 warnings 落地）。"""
+
+    file: str
+    messages: List[str] = Field(default_factory=list)
+
+
 class RenameBatchResponse(BaseModel):
     """POST /invoice/rename-batch 响应。"""
 
@@ -108,3 +115,4 @@ class RenameBatchResponse(BaseModel):
     renamed: int
     duplicates_resolved: int
     skipped: List[RenameSkippedItem]
+    warnings: List[RenameWarningItem] = Field(default_factory=list)

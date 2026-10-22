@@ -50,9 +50,9 @@ def parse_xml(xml_bytes: bytes, source_file: str) -> InvoiceRecord:
         label_name = _first_text(el, "LabelName")
         vat_kind = label_name or None
         break
-    if not vat_kind:
-        vat_kind = "普通发票"
-    invoice_type = f"电子发票（{vat_kind}）"
+    # 判定不出不兜底（2026-10-21 虾评众测 #5，双源同步）：曾默认"普通发票"，
+    # 缺标签的专票会被错标成普票——财务口径错误。None → 票种段/台账列省略。
+    invoice_type = f"电子发票（{vat_kind}）" if vat_kind else None
 
     is_red = False
     for el in root.iter("InIssuType"):

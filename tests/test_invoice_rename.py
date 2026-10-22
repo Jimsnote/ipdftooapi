@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models.invoice_extract import InvoiceRecord
+from app.services.invoice_extract import clean_amount, extract_bytes, normalize_cn_date
 from app.services.invoice_rename import (
     MAX_BUYER_LEN,
     MAX_FILENAME_LEN,
@@ -62,43 +63,43 @@ def _fu(data: bytes, name: str, mime: str = "application/octet-stream"):
 
 class TestBuildTargetName:
     def test_full_fields(self):
-        name = build_target_name(_rec(), ".pdf")
+        name, _trunc = build_target_name(_rec(), ".pdf")
         assert name == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}.pdf"
 
     def test_empty_prefix_omitted(self):
-        name = build_target_name(_rec(), ".pdf", "")
+        name, _trunc = build_target_name(_rec(), ".pdf", "")
         assert name == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}.pdf"
 
     def test_with_prefix(self):
-        name = build_target_name(_rec(), ".pdf", "2026年9月报销-")
+        name, _trunc = build_target_name(_rec(), ".pdf", "2026年9月报销-")
         assert name == f"2026年9月报销-{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}.pdf"
 
     def test_include_amount(self):
-        name = build_target_name(_rec(), ".pdf", include_amount=True)
+        name, _trunc = build_target_name(_rec(), ".pdf", include_amount=True)
         assert name == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}_736792.00元.pdf"
 
     def test_include_seller(self):
         """销售方开关（2026-10-17）：买卖双方相邻，位于购买方之后。"""
         rec = _rec(seller_name="方叔叔餐饮管理（北京）有限公司")
-        name = build_target_name(rec, ".pdf", include_seller=True)
+        name, _trunc = build_target_name(rec, ".pdf", include_seller=True)
         assert name == (
             f"{NUM_PDF}_{BUYER_PDF}_方叔叔餐饮管理（北京）有限公司_{DATE_PDF}.pdf"
         )
 
     def test_seller_off_by_default(self):
         rec = _rec(seller_name="方叔叔餐饮管理（北京）有限公司")
-        name = build_target_name(rec, ".pdf")
+        name, _trunc = build_target_name(rec, ".pdf")
         assert "方叔叔" not in name
 
     def test_seller_missing_omitted(self):
         """取不到销售方 → 该段省略（宁缺勿错，对齐票种语义）。"""
         rec = _rec(seller_name=None)
-        name = build_target_name(rec, ".pdf", include_seller=True)
+        name, _trunc = build_target_name(rec, ".pdf", include_seller=True)
         assert name == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}.pdf"
 
     def test_seller_truncated_to_30(self):
         long_seller = "沪" * 40
-        name = build_target_name(_rec(seller_name=long_seller), ".pdf", include_seller=True)
+        name, _trunc = build_target_name(_rec(seller_name=long_seller), ".pdf", include_seller=True)
         assert f"{'沪' * MAX_SELLER_LEN}_" in name
         assert long_seller not in name
 
@@ -108,7 +109,7 @@ class TestBuildTargetName:
             seller_name="方叔叔餐饮管理（北京）有限公司",
             invoice_type="电子发票（增值税专用发票）",
         )
-        name = build_target_name(
+        name, _trunc = build_target_name(
             rec, ".pdf", include_seller=True, include_type=True, include_amount=True
         )
         assert name == (
@@ -117,58 +118,58 @@ class TestBuildTargetName:
         )
 
     def test_amount_off_by_default_and_when_total_missing(self):
-        assert "_元" not in build_target_name(_rec(), ".pdf")
+        assert "_元" not in build_target_name(_rec(), ".pdf")[0]
         rec = _rec(total_with_tax=None)
-        assert "_元" not in build_target_name(rec, ".pdf", include_amount=True)
+        assert "_元" not in build_target_name(rec, ".pdf", include_amount=True)[0]
 
     def test_buyer_truncated_to_30(self):
         long_buyer = "北" * 40
-        name = build_target_name(_rec(buyer_name=long_buyer), ".pdf")
+        name, _trunc = build_target_name(_rec(buyer_name=long_buyer), ".pdf")
         assert f"{'北' * MAX_BUYER_LEN}_" in name
         assert long_buyer not in name
 
     def test_extension_preserved(self):
-        assert build_target_name(_rec(), ".ofd").endswith(".ofd")
-        assert build_target_name(_rec(), ".xml").endswith(".xml")
+        assert build_target_name(_rec(), ".ofd")[0].endswith(".ofd")
+        assert build_target_name(_rec(), ".xml")[0].endswith(".xml")
 
     def test_include_type_special(self):
         """票种开关：增值税专用发票 → _专票。"""
         rec = _rec(invoice_type="电子发票（增值税专用发票）")
-        name = build_target_name(rec, ".pdf", include_type=True)
+        name, _trunc = build_target_name(rec, ".pdf", include_type=True)
         assert name == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}_专票.pdf"
 
     def test_include_type_normal(self):
         rec = _rec(invoice_type="电子发票（普通发票）")
-        name = build_target_name(rec, ".pdf", include_type=True)
+        name, _trunc = build_target_name(rec, ".pdf", include_type=True)
         assert name == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}_普票.pdf"
 
     def test_include_type_unknown_omitted(self):
         """类型缺失/无法判定 → 不加段（宁缺勿错），其余不变。"""
-        no_type = build_target_name(_rec(invoice_type=None), ".pdf", include_type=True)
+        no_type, _trunc = build_target_name(_rec(invoice_type=None), ".pdf", include_type=True)
         assert no_type == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}.pdf"
-        other = build_target_name(
+        other, _trunc = build_target_name(
             _rec(invoice_type="电子发票（机票）"), ".pdf", include_type=True
         )
         assert other == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}.pdf"
 
     def test_type_off_by_default(self):
-        name = build_target_name(_rec(invoice_type="电子发票（增值税专用发票）"), ".pdf")
+        name, _trunc = build_target_name(_rec(invoice_type="电子发票（增值税专用发票）"), ".pdf")
         assert "专票" not in name
 
     def test_type_and_amount_order(self):
         """票种在日期后、金额保持末尾。"""
         rec = _rec(invoice_type="电子发票（增值税专用发票）")
-        name = build_target_name(rec, ".pdf", include_type=True, include_amount=True)
+        name, _trunc = build_target_name(rec, ".pdf", include_type=True, include_amount=True)
         assert name == f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}_专票_736792.00元.pdf"
 
     def test_missing_buyer_and_date_fallbacks(self):
         rec = _rec(buyer_name=None, issue_date=None)
-        name = build_target_name(rec, ".pdf")
+        name, _trunc = build_target_name(rec, ".pdf")
         assert name == f"{NUM_PDF}_unknown.pdf"
 
     def test_prefix_truncated_first_when_total_exceeds(self):
         long_prefix = "前" * MAX_PREFIX_LEN
-        name = build_target_name(_rec(), ".pdf", long_prefix)
+        name, _trunc = build_target_name(_rec(), ".pdf", long_prefix)
         assert len(name) <= MAX_FILENAME_LEN
         # 名字主体（无前缀部分）完整保留
         assert name.endswith(f"{NUM_PDF}_{BUYER_PDF}_{DATE_PDF}.pdf")
@@ -562,3 +563,47 @@ class TestRenameDownload:
         assert f"invoice_renamed_{task_id[:8]}.zip" in dl.headers.get(
             "content-disposition", ""
         )
+
+
+class TestV040CrowdFixes:
+    """2026-10-21 虾评众测 v0.4.0 回归（与 skills/invoice-rename selftest 同场景）。
+
+    #1/#2/#3 截断三连、#5 票种不兜底、#7 负数金额、#8 日期宽容、#4 warnings 落地。
+    """
+
+    def test_truncation_keeps_ext_dot_and_prefix_head(self):
+        rec = _rec(buyer_name="超长公司名称企业" * 3, seller_name="超长公司名称企业" * 3)
+        name, truncated = build_target_name(
+            rec, ".xml", prefix="2026年10月报销材料汇总超长测试用前缀",
+            include_seller=True, include_amount=True, include_type=True,
+        )
+        assert truncated
+        assert name.endswith(".xml"), name  # 扩展名连点完整（旧 bug 丢点成 _xml）
+        assert len(name) <= 100, f"{len(name)}: {name}"
+        assert name.startswith("2026"), name  # 前缀前部保留（旧 bug 负切片尾切）
+
+    def test_vat_missing_not_defaulted(self):
+        xml = _xml().replace("普通发票".encode("utf-8"), b"")
+        rec = extract_bytes(xml, "novat.xml", ".xml")
+        assert rec.invoice_type is None  # 缺标签不臆造"普通发票"（宁缺勿错）
+
+    def test_negative_amount_accepted(self):
+        assert clean_amount("-270.00") == "-270.00"
+        xml = _xml(total="-270.00", without="-254.72", tax="-15.28")
+        rec = extract_bytes(xml, "red.xml", ".xml")
+        assert rec.total_with_tax == "-270.00"
+
+    def test_datetime_and_compact_dates(self):
+        assert normalize_cn_date("2026-03-26 10:30:00") == "2026-03-26"
+        assert normalize_cn_date("20260326") == "2026-03-26"
+        assert normalize_cn_date("2026/3/5") == "2026-03-05"
+
+    def test_warnings_in_rename_response(self):
+        xml = _xml(number="12345")  # 非 20 位号码 → validate_record 告警
+        r = client.post(
+            "/api/v1/invoice/rename-batch",
+            files=[_fu(xml, "a.xml", "application/xml")],
+        )
+        assert r.status_code == 200, r.text
+        warns = r.json()["warnings"]
+        assert any("20 位" in m for w in warns for m in w["messages"]), warns

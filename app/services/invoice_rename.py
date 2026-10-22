@@ -24,6 +24,7 @@ from app.models.invoice_extract import (
     InvoiceRecord,
     RenameBatchResponse,
     RenameSkippedItem,
+    RenameWarningItem,
 )
 from app.services.invoice_extract import InvoiceExtractError, extract_bytes
 from app.services.invoice_extract.extractor import SUPPORTED_EXTENSIONS
@@ -128,8 +129,8 @@ def build_target_name(
     include_seller: bool = False,
     include_amount: bool = False,
     include_type: bool = False,
-) -> str:
-    """按 §4.1 规则生成目标文件名（已清洗，不含去重序号）。
+) -> Tuple[str, bool]:
+    """按 §4.1 规则生成目标文件名（已清洗，不含去重序号）。返回 (文件名, 是否截断)。
 
     ext：原始扩展名（含点、小写），如 ".pdf"；保持上传格式不变更。
     前置条件：record.invoice_number 非空（调用方保证，空号码走 skipped）。
@@ -161,20 +162,23 @@ def build_target_name(
         amount = _sanitize_component(record.total_with_tax, 20)
         if amount:
             parts.append(f"{amount}元")
-    name = "_".join(parts) + safe_ext
+    stem_full = "_".join(parts)
+    ext_with_dot = safe_ext  # 含分隔点，整段预算保下，永不截
 
-    # 总长 ≤100：超限先截前缀、再截名称主体（扩展名永不截）
-    if len(safe_prefix) + len(name) > MAX_FILENAME_LEN:
-        safe_prefix = safe_prefix[: MAX_FILENAME_LEN - len(name)].strip(". ")
-    if len(name) > MAX_FILENAME_LEN:
-        stem, dot, e = name.rpartition(".")
-        keep = MAX_FILENAME_LEN - len(e) - (1 if dot else 0)
-        # 审查②：截断边界可落在点号上（尾部点/keep=0 → ".pdf" 隐藏名），补 strip
-        stem = stem[:keep].strip(". ") if keep > 0 else ""
-        name = (stem + (e if dot else "")) if dot else stem
-        if not name.strip(". "):
-            name = "_" + (e if dot else "")
-    return safe_prefix + name
+    # 总长 ≤100（2026-10-21 虾评 #1/#2/#3 修复，与 skills/invoice-rename
+    # naming.py 逐字同构）：先压前缀（max(0,·) 防负数切片尾切），再截主体
+    # 尾部；扩展名连点完整保留（旧实现丢点 → "_xml"，产物不可识别）。
+    truncated = False
+    if len(safe_prefix) + len(stem_full) + len(ext_with_dot) > MAX_FILENAME_LEN:
+        truncated = True
+        prefix_budget = max(0, MAX_FILENAME_LEN - len(stem_full) - len(ext_with_dot))
+        safe_prefix = safe_prefix[:prefix_budget].strip(". ")
+        stem_budget = MAX_FILENAME_LEN - len(safe_prefix) - len(ext_with_dot)
+        if len(stem_full) > stem_budget:
+            stem_full = stem_full[: max(0, stem_budget)].rstrip("._ ")
+            if not stem_full:
+                stem_full = "_"
+    return safe_prefix + stem_full + ext_with_dot, truncated
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +326,8 @@ _MAGIC_MESSAGES = {
 def _parse_one(
     task_dir: str, index: int, orig_name: str, data: bytes, prefix: str,
     include_seller: bool, include_amount: bool, include_type: bool,
-) -> Tuple[str, bytes, str]:
-    """解析单文件并生成目标名。返回 (目标名, 数据, 扩展名)。
+) -> Tuple[str, bytes, str, List[str]]:
+    """解析单文件并生成目标名。返回 (目标名, 数据, 扩展名, 校验告警）。
 
     一切业务性失败（类型/损坏/版式不支持/加密/非数电票）抛 InvoiceExtractError。
     """
@@ -352,8 +356,13 @@ def _parse_one(
         raise InvoiceExtractError(
             "未能识别出发票号码——可能不是数电票标准版式，暂不支持"
         )
-    target = build_target_name(rec, ext, prefix, include_seller, include_amount, include_type)
-    return target, data, ext
+    target, truncated = build_target_name(
+        rec, ext, prefix, include_seller, include_amount, include_type
+    )
+    warns = list(rec.warnings or [])
+    if truncated:
+        warns.append("文件名超长已截断，末尾字段段可能被舍弃，请核对")
+    return target, data, ext, warns
 
 
 def run_batch(
@@ -385,6 +394,7 @@ def run_batch(
     # 请求局部状态（并发安全）
     skipped_pairs: List[Tuple[str, str]] = []  # (原文件名, 原因)
     skipped_files: List[Tuple[bytes, str]] = []  # (数据, 原文件名) → 原名进 ZIP
+    file_warnings: List[dict] = []  # 虾评 #4：校验告警落地（原 warnings 死代码）
     renamed: List[Tuple[str, str, bytes, str]] = []  # (原文件名, 目标名, 数据, 扩展名)
     total_read = 0  # 审查①-S1：实读字节累计（防声明值伪造）
 
@@ -399,12 +409,14 @@ def run_batch(
                     status_code=400,
                     detail="所有文件加起来不能超过 100MB，请分批处理",
                 )
-            target, data, ext = _parse_one(
+            target, data, ext, warns = _parse_one(
                 task_dir, index, orig_name, data, prefix, include_seller,
                 include_amount,
                 include_type,
             )
             renamed.append((orig_name, target, data, ext))
+            if warns:
+                file_warnings.append({"file": orig_name, "messages": warns})
         except InvoiceExtractError as e:
             # §4.4：单文件失败不 fail 整批，保留原名进 ZIP
             skipped_pairs.append((orig_name, str(e)))
@@ -468,4 +480,5 @@ def run_batch(
         renamed=len(renamed),
         duplicates_resolved=duplicates_resolved,
         skipped=[RenameSkippedItem(file=n, reason=r) for n, r in skipped_pairs],
+        warnings=[RenameWarningItem(file=w["file"], messages=w["messages"]) for w in file_warnings],
     )

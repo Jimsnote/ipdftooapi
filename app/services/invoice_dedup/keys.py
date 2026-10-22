@@ -36,7 +36,8 @@ def normalize_text(s: Optional[str]) -> str:
 # 金额
 # ---------------------------------------------------------------------------
 
-_AMOUNT_RE = re.compile(r"^\d+(\.\d{1,2})?$")
+# 负号：红字发票金额为负（2026-10-21 虾评众测 #7）
+_AMOUNT_RE = re.compile(r"^-?\d+(\.\d{1,2})?$")
 
 
 def clean_amount(raw: Optional[str]) -> Optional[str]:
