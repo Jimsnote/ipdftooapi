@@ -163,6 +163,65 @@ class TestInvoiceMergerStreaming:
         finally:
             doc.close()
 
+    def test_pages_render_incrementally_instead_of_all_before_save(
+        self, tmp_path, monkeypatch
+    ):
+        """首次编码时只能渲染第一页，禁止重新积攒全部 A4 画布。"""
+        pdf = _write_pdf(str(tmp_path / "inv.pdf"), n_pages=6)
+        merger = InvoiceMerger()
+        merger.analyze([pdf])
+
+        render_count = 0
+        original_get_pixmap = fitz.Page.get_pixmap
+
+        def counting_get_pixmap(page, *args, **kwargs):
+            nonlocal render_count
+            render_count += 1
+            return original_get_pixmap(page, *args, **kwargs)
+
+        save_render_counts = []
+        original_save = PILImage.Image.save
+
+        def recording_save(image, fp, format=None, **kwargs):
+            if format == "PDF":
+                save_render_counts.append(render_count)
+            return original_save(image, fp, format=format, **kwargs)
+
+        monkeypatch.setattr(fitz.Page, "get_pixmap", counting_get_pixmap)
+        monkeypatch.setattr(PILImage.Image, "save", recording_save)
+        merger.merge(str(tmp_path / "out.pdf"), per_page=1, page_numbers=False)
+
+        assert save_render_counts[0] == 1
+        assert save_render_counts == list(range(1, len(save_render_counts) + 1))
+        assert not list(tmp_path.glob(".invoice-pages-*"))
+
+    def test_final_save_failure_preserves_previous_output(self, tmp_path, monkeypatch):
+        """最终写盘失败不能破坏同一任务上一次已生成的完整结果。"""
+        pdf = _write_pdf(str(tmp_path / "inv.pdf"), n_pages=4)
+        output = str(tmp_path / "out.pdf")
+        merger = InvoiceMerger()
+        merger.analyze([pdf])
+        merger.merge(output, per_page=2)
+        previous = (tmp_path / "out.pdf").read_bytes()
+
+        original_save = fitz.Document.save
+
+        def failing_save(doc, filename, *args, **kwargs):
+            if doc.page_count == 2:
+                with open(filename, "wb") as f:
+                    f.write(b"PARTIAL")
+                raise RuntimeError("injected final save failure")
+            return original_save(doc, filename, *args, **kwargs)
+
+        monkeypatch.setattr(fitz.Document, "save", failing_save)
+        merger = InvoiceMerger()
+        merger.analyze([pdf])
+        with pytest.raises(RuntimeError, match="injected"):
+            merger.merge(output, per_page=2)
+
+        assert (tmp_path / "out.pdf").read_bytes() == previous
+        assert not list(tmp_path.glob(".invoice-pages-*"))
+
     def test_merge_output_renders_content(self, tmp_path):
         """流式写盘产物可正常渲染（页面非空白）。"""
         pdf = _write_pdf(str(tmp_path / "inv.pdf"), n_pages=1)

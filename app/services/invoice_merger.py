@@ -2,6 +2,8 @@
 
 import os
 import math
+import shutil
+import tempfile
 from dataclasses import dataclass
 from typing import List, Dict, Any
 
@@ -145,6 +147,9 @@ class InvoiceMerger:
 
         all_pages: List[fitz.Page] = []
         docs: List[fitz.Document] = []
+        page_dir = tempfile.mkdtemp(
+            prefix=".invoice-pages-", dir=os.path.dirname(os.path.abspath(output_path))
+        )
         try:
             for info in self._infos:
                 doc = fitz.open(info.path)
@@ -153,7 +158,7 @@ class InvoiceMerger:
                     all_pages.append(page)
 
             total_pages = math.ceil(len(all_pages) / per_page)
-            rendered_images: List[Image.Image] = []
+            page_paths: List[str] = []
 
             for page_idx in range(total_pages):
                 canvas = Image.new("RGB", (w_px, h_px), "white")
@@ -232,26 +237,27 @@ class InvoiceMerger:
                     tw = bbox[2] - bbox[0]
                     draw.text(((w_px - tw) / 2, h_px - margin_px + 10), text, fill="#666666", font=font)
 
-                rendered_images.append(canvas)
+                page_path = os.path.join(page_dir, f"page_{page_idx:04d}.pdf")
+                canvas.save(page_path, "PDF", resolution=300.0)
+                canvas.close()
+                page_paths.append(page_path)
 
-            # Save as multi-page PDF（流式写盘：逐页弹出画布、边转边编码，
-            # 峰值内存从「全量画布 + 全量转换副本 ≈ 2×26MB×页数」降为 O(1) 页。
-            # 2026-10-08 香港 OOM 事故根因之一；PIL 的 append_images 接受任意
-            # 可迭代对象，PdfImagePlugin 用 itertools.chain 惰性逐个消费）
-            if rendered_images:
-                first = rendered_images.pop(0).convert("RGB")
-
-                def _remaining_canvases():
-                    while rendered_images:
-                        yield rendered_images.pop(0).convert("RGB")
-
-                first.save(
-                    output_path,
-                    "PDF",
-                    resolution=300.0,
-                    save_all=True,
-                    append_images=_remaining_canvases(),
-                )
+            # 每页已在循环内编码并释放，这里只拼接压缩后的 PDF 对象。
+            staged_output = os.path.join(page_dir, "merged.pdf")
+            output_doc = fitz.open()
+            try:
+                for page_path in page_paths:
+                    page_doc = fitz.open(page_path)
+                    try:
+                        output_doc.insert_pdf(page_doc)
+                    finally:
+                        page_doc.close()
+                if page_paths:
+                    output_doc.save(staged_output)
+            finally:
+                output_doc.close()
+            if page_paths:
+                os.replace(staged_output, output_path)
         finally:
             # 异常路径也必须关闭文档（旧实现仅在正常返回时关闭）
             for doc in docs:
@@ -259,6 +265,7 @@ class InvoiceMerger:
                     doc.close()
                 except Exception:
                     pass
+            shutil.rmtree(page_dir, ignore_errors=True)
 
         return {
             "invoices_count": len(all_pages),
