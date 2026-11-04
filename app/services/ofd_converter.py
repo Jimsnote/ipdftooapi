@@ -320,10 +320,53 @@ def _patch_easyofd_fetch_cell_info() -> None:
     logger.info("已应用 easyofd fetch_cell_info 补丁（Clips list/空段容错）")
 
 
+def _scale_text_size_by_ctm(line: dict) -> dict:
+    """按 CTM 的 X 基向量缩放字号，输入字典保持不变。"""
+    ctm = line.get("CTM", "")
+    parts = ctm.split() if isinstance(ctm, str) else []
+    if len(parts) != 6:
+        return line
+    try:
+        scale = math.hypot(float(parts[0]), float(parts[1]))
+        size = float(line["size"])
+    except (KeyError, TypeError, ValueError):
+        return line
+    if not math.isfinite(scale) or scale <= 0 or math.isclose(scale, 1.0):
+        return line
+    scaled = dict(line)
+    scaled["size"] = size * scale
+    return scaled
+
+
+def _patch_easyofd_ctm_font_size() -> None:
+    """修复 easyofd 解析 CTM 后 resizeX 未赋值、字号始终按 1 倍绘制的问题。"""
+    try:
+        from easyofd.draw.draw_pdf import DrawPDF
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"easyofd DrawPDF 导入失败，跳过 CTM 字号补丁: {e}")
+        return
+
+    if getattr(DrawPDF.draw_chars, "_ipdftoo_ctm_font_patched", False):
+        return
+
+    original_draw_chars = DrawPDF.draw_chars
+
+    def draw_chars_with_ctm_font(self, canvas, text_list, fonts, page_size, drawparams):
+        scaled_lines = [_scale_text_size_by_ctm(line) for line in text_list]
+        return original_draw_chars(
+            self, canvas, scaled_lines, fonts, page_size, drawparams
+        )
+
+    draw_chars_with_ctm_font._ipdftoo_ctm_font_patched = True
+    DrawPDF.draw_chars = draw_chars_with_ctm_font
+    logger.info("已应用 easyofd CTM 字号缩放补丁")
+
+
 _patch_easyofd_signature_assert()
 _patch_easyofd_cmp_offset()
 _patch_easyofd_font()
 _patch_easyofd_fetch_cell_info()
+_patch_easyofd_ctm_font_size()
 
 
 def _is_plain_rect(abbr: str) -> bool:

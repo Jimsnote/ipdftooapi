@@ -92,6 +92,35 @@ class TestCmpOffsetGBranchGuard:
         assert pos_list[2] - pos_list[0] == pytest.approx(5)
 
 
+class TestCtmFontSize:
+    @staticmethod
+    def _scale(line):
+        from app.services.ofd_converter import _scale_text_size_by_ctm
+
+        return _scale_text_size_by_ctm(line)
+
+    def test_uniform_ctm_scales_font_without_mutating_input(self):
+        """Size=9 + CTM=0.3528 应输出 3.1752，覆盖银行回单事故。"""
+        line = {"size": 9.0, "CTM": "0.3528 0 0 0.3528 0 0"}
+        scaled = self._scale(line)
+        assert scaled["size"] == pytest.approx(3.1752)
+        assert line["size"] == 9.0
+
+    def test_rotation_without_scale_keeps_font_size(self):
+        """90° 旋转矩阵的 X 基向量模长仍为 1，不能把字号缩成 0。"""
+        line = {"size": 9.0, "CTM": "0 1 -1 0 0 0"}
+        assert self._scale(line)["size"] == pytest.approx(9.0)
+
+    @pytest.mark.parametrize("ctm", ["", "1 0 0 1 0 0", "bad", "0 0 0 0 0 0"])
+    def test_identity_or_invalid_ctm_keeps_original_line(self, ctm):
+        line = {"size": 9.0, "CTM": ctm}
+        assert self._scale(line) is line
+
+    def test_rotation_and_enlargement_use_vector_length(self):
+        line = {"size": 9.0, "CTM": "0 -2 2 0 0 0"}
+        assert self._scale(line)["size"] == pytest.approx(18.0)
+
+
 # ---------------------------------------------------------------------------
 # P1-6 convert_ofd_batch_async
 # ---------------------------------------------------------------------------
