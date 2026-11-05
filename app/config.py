@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     OCR_MIN_IMG_DIM: int = 200
     OCR_ENGINE: str = "onnxruntime"  # "onnxruntime" (Linux) | "mkldnn_false" (Windows local test)
 
+    # 匿名用户调研（独立 SQLite，部署 archive 不覆盖 data/）
+    SURVEY_DB_PATH: str = os.path.abspath(
+        "/app/data/survey.db" if os.path.exists("/app/data") else "./data/survey.db"
+    )
+
     # Pay Skill（支付宝 AI 按量付费 / A402）
     # docs/2026-10-13_invoice-toolkit-pro-p0-design.md §5.5 / §10.1
     # 沙箱凭据见 apps/api/.env.sandbox（gitignore）；本地 T2 联调用

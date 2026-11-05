@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
 from app.config import settings
-from app.routers import pdf, health, id_photo, invoice, invoice_extract, invoice_rename, ocr, ofd, ofd_invoice, redact, skill_gateway, visa
+from app.routers import pdf, health, id_photo, invoice, invoice_extract, invoice_rename, ocr, ofd, ofd_invoice, redact, skill_gateway, survey, visa
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -111,6 +111,15 @@ async def request_validation_exception_handler(request: Request, exc: RequestVal
     )
 
 
+@app.middleware("http")
+async def survey_body_limit(request: Request, call_next):
+    if request.url.path == "/api/v1/survey/submit":
+        content_length = request.headers.get("content-length")
+        if content_length and content_length.isdigit() and int(content_length) > 8192:
+            return JSONResponse(status_code=413, content={"detail": "问卷内容过长"})
+    return await call_next(request)
+
+
 # Routers
 app.include_router(health.router, prefix="/api/v1", tags=["Health"])
 app.include_router(pdf.router, prefix="/api/v1/pdf", tags=["PDF"])
@@ -125,3 +134,4 @@ app.include_router(visa.router, prefix="/api/v1/visa", tags=["Visa Form"])
 app.include_router(redact.router, prefix="/api/v1/redact", tags=["Redact"])
 # Pay Skill 统一付费网关（支付宝 AI 按量付费；P0 设计 §2）
 app.include_router(skill_gateway.router, prefix="/api/v1/skill", tags=["Skill Pay"])
+app.include_router(survey.router, prefix="/api/v1/survey", tags=["Survey"])
