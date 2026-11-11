@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     # Upload limits
     MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
+    MERGE_MAX_TOTAL_SIZE: int = 45 * 1024 * 1024  # 给 Nginx 50MB 留出 multipart 开销
     MAX_FILES_PER_REQUEST: int = 20
 
     # OFD viewer（docs/OFD_VIEWER_DESIGN.md：20MB 上限，数科官方 5MB 的 4 倍）

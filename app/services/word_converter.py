@@ -30,6 +30,32 @@ def _find_libreoffice() -> str:
     )
 
 
+def _run_libreoffice(cmd: list) -> subprocess.CompletedProcess:
+    profile_dir = tempfile.mkdtemp(prefix="lo_profile_")
+    profile_uri = pathlib.Path(profile_dir).as_uri()
+    cmd.insert(1, f"-env:UserInstallation={profile_uri}")
+    try:
+        with _libreoffice_lock:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+                check=True,
+            )
+        logger.info(f"LibreOffice stdout: {result.stdout.decode('utf-8', errors='ignore')[:200]}")
+        return result
+    except subprocess.TimeoutExpired:
+        logger.error("LibreOffice conversion timed out after 120s")
+        raise RuntimeError("Word 转 PDF 超时，请稍后重试")
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode("utf-8", errors="ignore") if e.stderr else ""
+        logger.error(f"LibreOffice conversion failed: {stderr}")
+        raise RuntimeError("Word 转 PDF 失败，请重试或更换文件")
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+
+
 class WordConverter:
     """Convert Word documents (.docx, .doc) to PDF using LibreOffice."""
 
@@ -74,37 +100,38 @@ class WordConverter:
 
         logger.info(f"Converting Word to PDF: {self.input_path}")
 
-        # 独立 user profile：避免并发时与其它 LibreOffice 实例互踩
-        profile_dir = tempfile.mkdtemp(prefix="lo_profile_")
-        profile_uri = pathlib.Path(profile_dir).as_uri()
-        cmd.insert(1, f"-env:UserInstallation={profile_uri}")
-
-        try:
-            with _libreoffice_lock:
-                result = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=120,  # 2 minutes max
-                    check=True,
-                )
-            logger.info(f"LibreOffice stdout: {result.stdout.decode('utf-8', errors='ignore')[:200]}")
-        except subprocess.TimeoutExpired:
-            logger.error("LibreOffice conversion timed out after 120s")
-            raise RuntimeError("Word 转 PDF 超时，请稍后重试")
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr.decode("utf-8", errors="ignore") if e.stderr else ""
-            logger.error(f"LibreOffice conversion failed: {stderr}")
-            raise RuntimeError("Word 转 PDF 失败，请重试或更换文件")
-        finally:
-            shutil.rmtree(profile_dir, ignore_errors=True)
+        _run_libreoffice(cmd)
 
         if not os.path.exists(expected_output):
             # LibreOffice might name it differently; search for any .pdf in outdir
             pdf_files = [f for f in os.listdir(output_dir) if f.endswith(".pdf")]
             if pdf_files:
                 expected_output = os.path.join(output_dir, pdf_files[0])
-            else:
+            elif self.input_path.lower().endswith(".docx"):
+                # 部分 OOXML 文件能被 python-docx 读取、却不能被 LibreOffice
+                # 直接加载。先重存规范包，再仅对这类无产物任务重试一次。
+                from docx import Document
+
+                normalized_path = os.path.join(output_dir, f"{base_name}.normalized.docx")
+                normalized_pdf = os.path.join(output_dir, f"{base_name}.normalized.pdf")
+                try:
+                    Document(self.input_path).save(normalized_path)
+                    retry_cmd = [
+                        libreoffice,
+                        "--headless",
+                        "--convert-to",
+                        "pdf",
+                        "--outdir",
+                        output_dir,
+                        normalized_path,
+                    ]
+                    _run_libreoffice(retry_cmd)
+                    if os.path.exists(normalized_pdf):
+                        expected_output = normalized_pdf
+                finally:
+                    if os.path.exists(normalized_path):
+                        os.remove(normalized_path)
+            if not os.path.exists(expected_output):
                 raise RuntimeError("转换完成但未找到 PDF 输出文件")
 
         # Rename to desired output path if different

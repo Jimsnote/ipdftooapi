@@ -174,10 +174,10 @@ async def merge_pdf(
 
     # 审计 #20：merge 系补总量守卫（此前单文件各 ≤50MB 但 20 个可合计 1GB）
     # 声明值预检（快速失败）+ 落盘后实际字节累计（防 Content-Length 伪造）双保险
-    if sum(f.size or 0 for f in files) > 2 * settings.MAX_UPLOAD_SIZE:
+    if sum(f.size or 0 for f in files) > settings.MERGE_MAX_TOTAL_SIZE:
         raise HTTPException(
             status_code=400,
-            detail="所有文件加起来不能超过 100MB，请分批处理",
+            detail="所有文件加起来不能超过 45MB，请分批处理",
         )
 
     task_id, task_dir = make_task_dir(TEMP_DIR)
@@ -188,10 +188,10 @@ async def merge_pdf(
         validate_pdf(f)
         path = save_pdf(f, task_dir, f"input_{len(input_paths)}.pdf")
         total_written += os.path.getsize(path)
-        if total_written > 2 * settings.MAX_UPLOAD_SIZE:
+        if total_written > settings.MERGE_MAX_TOTAL_SIZE:
             raise HTTPException(
                 status_code=400,
-                detail="所有文件加起来不能超过 100MB，请分批处理",
+                detail="所有文件加起来不能超过 45MB，请分批处理",
             )
         input_paths.append(path)
 
@@ -258,10 +258,10 @@ async def merge_batch(
         for name in os.listdir(task_dir)
         if name.endswith(".pdf")
     )
-    if total_written > 2 * settings.MAX_UPLOAD_SIZE:
+    if total_written > settings.MERGE_MAX_TOTAL_SIZE:
         raise HTTPException(
             status_code=400,
-            detail="所有文件加起来不能超过 100MB，请分批处理",
+            detail="所有文件加起来不能超过 45MB，请分批处理",
         )
 
     logger.info(f"Merge-batch task {task_id}: received file {index + 1}/{total}")

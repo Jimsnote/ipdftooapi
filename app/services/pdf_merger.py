@@ -1,10 +1,26 @@
 import os
 from typing import List
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
 
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _read_without_invalid_link_actions(path: str) -> PdfReader:
+    reader = PdfReader(path)
+    for page_number, page in enumerate(reader.pages, start=1):
+        for ref in page.get("/Annots", []):
+            annotation = ref.get_object()
+            action = annotation.get("/A")
+            if action is not None and "/S" not in action.get_object():
+                logger.warning(
+                    "忽略无效链接动作: %s 第 %d 页",
+                    os.path.basename(path),
+                    page_number,
+                )
+                del annotation["/A"]
+    return reader
 
 
 class PDFMerger:
@@ -19,7 +35,7 @@ class PDFMerger:
         for path in self.file_paths:
             if not os.path.exists(path):
                 raise FileNotFoundError(f"File not found: {path}")
-            writer.append(path)
+            writer.append(_read_without_invalid_link_actions(path))
 
         with open(output_path, "wb") as f:
             writer.write(f)

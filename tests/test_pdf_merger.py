@@ -3,6 +3,7 @@ import tempfile
 
 import pytest
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import ArrayObject, DictionaryObject, NameObject, NumberObject
 
 from app.services.pdf_merger import PDFMerger
 
@@ -40,3 +41,29 @@ def test_merge_missing_file_raises():
         PDFMerger(["/this/does/not/exist.pdf"]).merge(
             os.path.join(tempfile.mkdtemp(), "x.pdf")
         )
+
+
+def test_merge_link_action_without_s_is_ignored():
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "invalid-link.pdf")
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=595.27, height=841.89)
+    action = DictionaryObject()
+    action[NameObject("/Filter")] = NameObject("/FlateDecode")
+    annotation = DictionaryObject()
+    annotation[NameObject("/Type")] = NameObject("/Annot")
+    annotation[NameObject("/Subtype")] = NameObject("/Link")
+    annotation[NameObject("/Rect")] = ArrayObject(
+        [NumberObject(10), NumberObject(10), NumberObject(100), NumberObject(100)]
+    )
+    annotation[NameObject("/A")] = action
+    page[NameObject("/Annots")] = ArrayObject([writer._add_object(annotation)])
+    with open(path, "wb") as f:
+        writer.write(f)
+
+    out = os.path.join(d, "merged.pdf")
+    PDFMerger([path]).merge(out)
+
+    merged_page = PdfReader(out).pages[0]
+    assert len(merged_page["/Annots"]) == 1
+    assert "/A" not in merged_page["/Annots"][0].get_object()

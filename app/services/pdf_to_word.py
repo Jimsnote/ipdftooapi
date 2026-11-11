@@ -7,6 +7,72 @@ from app.core.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _patch_pdf2docx_zero_area_text() -> None:
+    """pdf2docx 0.5.8 隐藏文字过滤未处理零面积文本框，补跳过逻辑。"""
+    from pdf2docx.page.RawPageFitz import RawPageFitz
+
+    if getattr(RawPageFitz._preprocess_text, "_ipdftoo_zero_area_patched", False):
+        return
+
+    def preprocess_text_safe(self, **settings):
+        import logging
+        from pdf2docx.common.algorithm import get_area
+        from pdf2docx.common.constants import FACTOR_A_HALF
+
+        ocr = settings["ocr"]
+        if ocr == 1:
+            raise SystemExit("OCR feature is planned but not implemented yet.")
+
+        raw = self.page_engine.get_text("rawdict", flags=64)
+        text_blocks = raw.get("blocks", [])
+        try:
+            spans = self.page_engine.get_texttrace()
+        except SystemError:
+            logging.warning("Ignore hidden text checking due to UnicodeDecodeError in upstream library.")
+            spans = []
+        if not spans:
+            return text_blocks
+
+        if ocr == 2:
+            filtered_spans = [span for span in spans if span["type"] != 3]
+        else:
+            filtered_spans = [span for span in spans if span["type"] == 3]
+
+        def span_area(bbox):
+            x0, y0, x1, y1 = bbox
+            return (x1 - x0) * (y1 - y0)
+
+        blocks = []
+        for block in text_blocks:
+            intersected = False
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    area = span_area(span["bbox"])
+                    if area <= 0:
+                        continue
+                    for filter_span in filtered_spans:
+                        intersected_area = get_area(span["bbox"], filter_span["bbox"])
+                        if (
+                            intersected_area / area >= FACTOR_A_HALF
+                            and span["font"] == filter_span["font"]
+                        ):
+                            intersected = True
+                            break
+                    if intersected:
+                        break
+                if intersected:
+                    break
+            if not intersected:
+                blocks.append(block)
+        return blocks
+
+    preprocess_text_safe._ipdftoo_zero_area_patched = True
+    RawPageFitz._preprocess_text = preprocess_text_safe
+
+
+_patch_pdf2docx_zero_area_text()
+
+
 class PDFToWordConverter:
     """Convert PDF files to Word (.docx) format using pdf2docx."""
 
