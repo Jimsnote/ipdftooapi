@@ -85,6 +85,31 @@ def test_health_ok(client):
     body = r.json()
     assert body["status"] == "ok"
     assert body["service"] == "ipdftoo-api"
+    assert len(r.headers["x-request-id"]) == 16
+
+
+def test_error_response_has_request_id(client):
+    r = client.post(
+        "/api/v1/pdf/split",
+        files={"file": ("invalid.txt", b"not a pdf", "text/plain")},
+        data={"mode": "all"},
+    )
+    assert r.status_code == 415
+    assert len(r.headers["x-request-id"]) == 16
+
+
+def test_unhandled_error_returns_request_id(client):
+    from app.main import app
+
+    @app.get("/api/v1/__test_unhandled_error")
+    async def unhandled_error():
+        raise RuntimeError("敏感内部错误")
+
+    r = client.get("/api/v1/__test_unhandled_error")
+    assert r.status_code == 500
+    assert r.json()["detail"] == "服务器处理失败，请稍后重试"
+    assert len(r.headers["x-request-id"]) == 16
+    assert "敏感内部错误" not in r.text
 
 
 # ---------- PDF 路由正常链路 ----------

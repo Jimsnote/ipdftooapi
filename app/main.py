@@ -1,4 +1,5 @@
 import math
+import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -35,6 +36,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
 
 
@@ -118,6 +120,36 @@ async def survey_body_limit(request: Request, call_next):
         if content_length and content_length.isdigit() and int(content_length) > 8192:
             return JSONResponse(status_code=413, content={"detail": "问卷内容过长"})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = uuid.uuid4().hex[:16]
+    request.state.request_id = request_id
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "Unhandled error request_id=%s method=%s path=%s",
+            request_id,
+            request.method,
+            request.url.path,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "服务器处理失败，请稍后重试"},
+            headers={"X-Request-ID": request_id},
+        )
+    response.headers["X-Request-ID"] = request_id
+    if response.status_code >= 400:
+        logger.warning(
+            "Request failed request_id=%s method=%s path=%s status=%s",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+        )
+    return response
 
 
 # Routers
