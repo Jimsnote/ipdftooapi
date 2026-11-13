@@ -9,6 +9,15 @@ from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
+GS_TIMEOUT_SECONDS = 280
+
+
+def _remove_partial_output(output_path: str) -> None:
+    try:
+        os.remove(output_path)
+    except FileNotFoundError:
+        pass
+
 
 class PDFCompressor:
     """PDF compression with multiple quality levels.
@@ -113,15 +122,17 @@ class PDFCompressor:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=GS_TIMEOUT_SECONDS,
             )
             if result.returncode != 0:
+                _remove_partial_output(output_path)
                 logger.error(f"Ghostscript error: {result.stderr}")
                 raise RuntimeError(
                     f"PDF compression failed: {result.stderr or 'unknown error'}"
                 )
         except subprocess.TimeoutExpired:
-            logger.error("Ghostscript timed out after 120s")
+            _remove_partial_output(output_path)
+            logger.error(f"Ghostscript timed out after {GS_TIMEOUT_SECONDS}s")
             raise RuntimeError("PDF compression timed out")
 
         # Ghostscript may produce empty output for corrupted PDFs

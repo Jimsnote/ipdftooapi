@@ -3,7 +3,7 @@ import tempfile
 
 import pytest
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import ArrayObject, DictionaryObject, NameObject, NumberObject
+from pypdf.generic import ArrayObject, DictionaryObject, NameObject, NullObject, NumberObject
 
 from app.services.pdf_merger import PDFMerger
 
@@ -43,7 +43,8 @@ def test_merge_missing_file_raises():
         )
 
 
-def test_merge_link_action_without_s_is_ignored():
+@pytest.mark.parametrize("indirect_annots", [False, True])
+def test_merge_link_action_without_s_is_ignored(indirect_annots):
     d = tempfile.mkdtemp()
     path = os.path.join(d, "invalid-link.pdf")
     writer = PdfWriter()
@@ -57,7 +58,8 @@ def test_merge_link_action_without_s_is_ignored():
         [NumberObject(10), NumberObject(10), NumberObject(100), NumberObject(100)]
     )
     annotation[NameObject("/A")] = action
-    page[NameObject("/Annots")] = ArrayObject([writer._add_object(annotation)])
+    annots = ArrayObject([writer._add_object(annotation)])
+    page[NameObject("/Annots")] = writer._add_object(annots) if indirect_annots else annots
     with open(path, "wb") as f:
         writer.write(f)
 
@@ -67,3 +69,18 @@ def test_merge_link_action_without_s_is_ignored():
     merged_page = PdfReader(out).pages[0]
     assert len(merged_page["/Annots"]) == 1
     assert "/A" not in merged_page["/Annots"][0].get_object()
+
+
+def test_merge_null_annotations_does_not_fail_in_cleanup():
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "null-annots.pdf")
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=595.27, height=841.89)
+    page[NameObject("/Annots")] = writer._add_object(NullObject())
+    with open(path, "wb") as f:
+        writer.write(f)
+
+    out = os.path.join(d, "merged.pdf")
+    PDFMerger([path]).merge(out)
+
+    assert len(PdfReader(out).pages) == 1

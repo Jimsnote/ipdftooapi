@@ -10,7 +10,19 @@ logger = get_logger(__name__)
 def _read_without_invalid_link_actions(path: str) -> PdfReader:
     reader = PdfReader(path)
     for page_number, page in enumerate(reader.pages, start=1):
-        for ref in page.get("/Annots", []):
+        annots = page.get("/Annots")
+        if annots is None:
+            continue
+        annots = annots.get_object()
+        if not isinstance(annots, list):
+            logger.warning(
+                "忽略非数组注释列表: %s 第 %d 页",
+                os.path.basename(path),
+                page_number,
+            )
+            del page["/Annots"]
+            continue
+        for ref in annots:
             annotation = ref.get_object()
             action = annotation.get("/A")
             if action is not None and "/S" not in action.get_object():
