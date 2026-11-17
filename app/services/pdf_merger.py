@@ -22,8 +22,16 @@ def _read_without_invalid_link_actions(path: str) -> PdfReader:
             )
             del page["/Annots"]
             continue
-        for ref in annots:
+        for ref in list(annots):
             annotation = ref.get_object()
+            if not isinstance(annotation, dict) or "/Subtype" not in annotation:
+                logger.warning(
+                    "忽略无效注释（缺少 /Subtype）: %s 第 %d 页",
+                    os.path.basename(path),
+                    page_number,
+                )
+                annots.remove(ref)
+                continue
             action = annotation.get("/A")
             if action is not None and "/S" not in action.get_object():
                 logger.warning(

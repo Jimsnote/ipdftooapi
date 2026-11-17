@@ -84,3 +84,27 @@ def test_merge_null_annotations_does_not_fail_in_cleanup():
     PDFMerger([path]).merge(out)
 
     assert len(PdfReader(out).pages) == 1
+
+
+def test_merge_annotation_without_subtype_is_ignored():
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "missing-subtype.pdf")
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=595.27, height=841.89)
+    invalid = DictionaryObject()
+    invalid[NameObject("/Type")] = NameObject("/Annot")
+    valid = DictionaryObject()
+    valid[NameObject("/Type")] = NameObject("/Annot")
+    valid[NameObject("/Subtype")] = NameObject("/Text")
+    page[NameObject("/Annots")] = ArrayObject(
+        [writer._add_object(invalid), writer._add_object(valid)]
+    )
+    with open(path, "wb") as f:
+        writer.write(f)
+
+    out = os.path.join(d, "merged.pdf")
+    PDFMerger([path]).merge(out)
+
+    annotations = PdfReader(out).pages[0]["/Annots"]
+    assert len(annotations) == 1
+    assert annotations[0].get_object()["/Subtype"] == "/Text"
